@@ -50,6 +50,16 @@ class TestTuiStructure(unittest.TestCase):
         self.assertIn("btn-new", src)
         self.assertIn("action_new_session", src)
         self.assertIn("New session", src)
+        # Modern workspace chrome + proof-plot result surface
+        self.assertIn("command-strip", src)
+        self.assertIn("status-chips", src)
+        self.assertIn("evidence-plots", src)
+        self.assertIn("evidence-title", src)
+        self.assertIn("sample-select", src)
+        self.assertIn("list_sample_csv_options", src)
+        self.assertIn("_set_status_chips", src)
+        self.assertIn("RESULTS", src)
+        self.assertIn("SETUP", src)
         # Path sanitizer unit check
         from src.tui_app import normalize_csv_path
 
@@ -82,17 +92,39 @@ class TestTuiStructure(unittest.TestCase):
 
     def test_app_entry_defaults_to_tui_not_gradio(self):
         app_src = (ROOT / "app.py").read_text(encoding="utf-8")
-        self.assertIn("run_tui", app_src)
+        # Launch goes through interchangeable UI backends
+        self.assertIn("launch_ui", app_src)
         self.assertIn("cli-once", app_src)
+        self.assertIn("--ui", app_src)
         # Gradio should not be the default launch path
         self.assertNotIn("demo.launch", app_src)
         self.assertNotIn("import gradio", app_src)
+        # Textual still the default backend
+        from src.ui_launch import resolve_ui
+        import os
+
+        old = os.environ.pop("GT_UI", None)
+        try:
+            self.assertEqual(resolve_ui(None), "textual")
+        finally:
+            if old is not None:
+                os.environ["GT_UI"] = old
 
     def test_import_tui_app_module(self):
         from src import tui_app
 
         self.assertTrue(callable(tui_app.run_tui))
         self.assertTrue(hasattr(tui_app, "GTDiagnosticTUI"))
+        # Real compose path: app class instantiates without import/CSS errors
+        app = tui_app.GTDiagnosticTUI(auto_download=False)
+        self.assertIn("command-strip", app.CSS)
+        self.assertIn("evidence-plots", app.CSS)
+        self.assertTrue(callable(getattr(app, "compose", None)))
+        opts = tui_app.list_sample_csv_options()
+        self.assertGreaterEqual(len(opts), 1)
+        # Demo sample ships with the repo
+        labels = " ".join(o[0] for o in opts)
+        self.assertIn("gt_sensors_demo", labels)
 
 
 if __name__ == "__main__":

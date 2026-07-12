@@ -556,9 +556,17 @@ def ensure_embeddings(model_name: Optional[str] = None) -> Tuple[Any, str]:
 
     try:
         logger.info("Loading embedding model '%s' …", name)
-        model = SentenceTransformer(name)
+        try:
+            from .device import torch_device
+
+            dev = torch_device()
+            model = SentenceTransformer(name, device=dev)
+            dev_note = f" on {dev}"
+        except TypeError:
+            model = SentenceTransformer(name)
+            dev_note = ""
         _EMBED_CACHE[name] = model
-        return model, f"Embedding model ready: {name}"
+        return model, f"Embedding model ready: {name}{dev_note}"
     except Exception as exc:  # noqa: BLE001
         _EMBED_FAIL_MSG = f"Embedding load failed: {exc}"
         logger.warning("%s", _EMBED_FAIL_MSG)
@@ -629,11 +637,22 @@ def ensure_tspulse(
             logger.info("Loading TS Pulse %s %s …", mid, kwargs or "(default)")
             model = loader.from_pretrained(mid, **kwargs)
             model.eval()
+            # Prefer CUDA when available
+            try:
+                from .device import device_status_summary, move_module_to_device, torch_device
+
+                dev = torch_device()
+                model = move_module_to_device(model, dev)
+                dev_note = f" on {dev}"
+                logger.info("TS Pulse device: %s", device_status_summary())
+            except Exception as dev_exc:  # noqa: BLE001
+                dev_note = ""
+                logger.debug("TS Pulse device placement skipped: %s", dev_exc)
             _TSPULSE_CACHE[cache_key] = model
             return (
                 model,
                 "tspulse",
-                f"TS Pulse ready: {mid} {kwargs or '(default rev)'}",
+                f"TS Pulse ready: {mid} {kwargs or '(default rev)'}{dev_note}",
             )
         except Exception as exc:  # noqa: BLE001
             last_err = exc

@@ -4,7 +4,7 @@ Fully **local** gas turbine (GT) diagnostic application:
 
 | Layer | Technology |
 |-------|------------|
-| UI | **Textual TUI** — CSV path, Alerts / Trips-Event, process-map context, **progress bar + ETA** |
+| UI | **Modern Textual TUI** — command strip, status chips, sample picker, proof plots, live pipeline, progress + ETA |
 | Anomaly detection | Granite **TS Pulse** (anomaly revision) + statistical fallback |
 | Main LLM | **Granite 4.1 8B** GGUF via llama-cpp-python or official **llama-cli** (CPU) |
 | RAG | **ChromaDB** + **SentenceTransformer** (`all-MiniLM-L6-v2`) |
@@ -48,7 +48,18 @@ pip install -r requirements.txt
 python app.py
 ```
 
-This opens a **terminal UI (Textual TUI)** in your console — not a browser.
+This opens a **terminal UI** in your console — not a browser.
+
+### Swap TUI backends (Textual ↔ ratatui)
+
+Same diagnosis engine; two interchangeable frontends:
+
+| Backend | Launch | Notes |
+|---------|--------|--------|
+| **Textual** (default) | `python app.py` or `python app.py --ui textual` | Pure Python |
+| **ratatui** (Rust) | `python app.py --ui ratatui` or `$env:GT_UI='ratatui'; python app.py` | Build once: `cd tui_ratatui && cargo build --release` |
+
+The ratatui UI calls `python app.py --json-once …` under the hood (see `src/bridge.py`, `tui_ratatui/README.md`).
 
 | Key | Action |
 |-----|--------|
@@ -61,6 +72,8 @@ While loading models or running a diagnosis, the **bottom status panel** shows:
 - checklist of steps (CSV → anomaly → RAG → LLM → finalize)
 - progress bar (% complete)
 - current step text, elapsed time, and estimated time remaining
+
+After a run, the right pane shows **proof plots**: ASCII charts of the channels the anomaly engine ranked highest, with **▲** on flagged samples — visual evidence next to the written diagnosis. The same plots are embedded in the markdown report and written to `logs/last_evidence_plots.txt`.
 
 Optional flags:
 
@@ -119,12 +132,14 @@ Tests drive **real** shipped functions (`detect_anomalies`, `score_severity`, `s
 
 ## Performance notes
 
-Diagnosis on CPU is dominated by the **Granite 8B GGUF** step (model load + generation via llama-cli). Defaults are tuned for speed:
+Diagnosis is dominated by the **Granite 8B GGUF** step. Defaults:
 
-- Single LLM pass (no second reflection gen) unless `GT_FULL_REFLECTION=1`
-- `max_tokens=384`, `n_ctx=2048`
-- Prefetch weights without double-loading at startup
+- **Prefer CUDA when available** (torch TS Pulse/embeddings + GGUF `n_gpu_layers`)
+- Single LLM pass unless `GT_FULL_REFLECTION=1`
+- `max_tokens` / `n_ctx` sized for structured reports
 - Skip GGUF smoke generate unless `GT_LLAMA_SMOKE=1`
+
+On a laptop with an **NVIDIA RTX**, install a **CUDA** build of PyTorch and ideally **llama-cpp-python** with CUDA (or place a CUDA llama.cpp build under `models/llama-cpp-bin/`). Without CUDA packages, the app stays on CPU automatically.
 
 `--cli-once` prints `[load …%]` / `[diag …%]` progress lines on **stderr**.
 
@@ -133,6 +148,10 @@ Diagnosis on CPU is dominated by the **Granite 8B GGUF** step (model load + gene
 | Variable | Purpose |
 |----------|---------|
 | `GT_GGUF_PATH` | Absolute path to Granite GGUF |
+| `GT_N_GPU_LAYERS` | llama.cpp GPU layers (`0`=CPU, `99`≈all). Auto: `99` if CUDA else `0` |
+| `GT_FORCE_CPU` / `GT_NO_GPU` | `1` = never use GPU |
+| `GT_TORCH_DEVICE` | `auto` (default), `cuda`, or `cpu` for TS Pulse / embeddings |
+| `GT_LLAMA_CPP_ZIP_URL` | Override llama.cpp binary zip (e.g. CUDA build URL) |
 | `GT_TSPULSE_MODEL` | HF model id override |
 | `GT_TSPULSE_REVISION` | HF revision (anomaly detection) |
 | `GT_FULL_REFLECTION` | Default: second LLM self-review when GGUF is loaded. Set `0` to skip (faster). |

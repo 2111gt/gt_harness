@@ -181,7 +181,16 @@ class KnowledgeRAG:
 
             from sentence_transformers import SentenceTransformer
 
-            self._embedder = SentenceTransformer(self.embedding_model_name)
+            try:
+                from .device import torch_device
+
+                dev = torch_device()
+                self._embedder = SentenceTransformer(
+                    self.embedding_model_name, device=dev
+                )
+                logger.info("Embeddings on device=%s", dev)
+            except TypeError:
+                self._embedder = SentenceTransformer(self.embedding_model_name)
             return self._embedder
         except Exception as exc:  # noqa: BLE001
             logger.warning("SentenceTransformer unavailable: %s", exc)

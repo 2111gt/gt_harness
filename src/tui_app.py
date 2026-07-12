@@ -42,6 +42,8 @@ from textual.widgets import (
     RadioButton,
     RadioSet,
     RichLog,
+    Rule,
+    Select,
     Static,
     TextArea,
 )
@@ -62,6 +64,26 @@ from .utils import (
 logger = setup_logging()
 
 DEFAULT_CSV = str((SAMPLES_DIR / "gt_sensors_demo.csv").resolve())
+
+
+def list_sample_csv_options() -> List[Tuple[str, str]]:
+    """
+    Build (label, absolute path) pairs for the sample scenario picker.
+
+    Includes root demo CSV plus scenario folders under samples/.
+    """
+    opts: List[Tuple[str, str]] = []
+    if not SAMPLES_DIR.is_dir():
+        return opts
+    demo = SAMPLES_DIR / "gt_sensors_demo.csv"
+    if demo.is_file():
+        opts.append(("Demo · gt_sensors_demo.csv", str(demo.resolve())))
+    for sub in sorted(SAMPLES_DIR.iterdir()):
+        if not sub.is_dir():
+            continue
+        for csv in sorted(sub.glob("*.csv")):
+            opts.append((f"{sub.name} · {csv.name}", str(csv.resolve())))
+    return opts
 
 
 def normalize_csv_path(raw: str) -> str:
@@ -91,11 +113,31 @@ def normalize_csv_path(raw: str) -> str:
         if os.name == "nt" and re.match(r"^/[A-Za-z]:/", path):
             path = path[1:]
         text = path
-    # Normalize separators for display on Windows
+    # Normalize separators for display on Windows; resolve relative to project root
     try:
         p = Path(text)
-        if p.exists():
+        if p.is_file():
             text = str(p.resolve())
+        else:
+            from .utils import PROJECT_ROOT, SAMPLES_DIR
+
+            for cand in (
+                PROJECT_ROOT / text,
+                SAMPLES_DIR / Path(text).name,
+            ):
+                if cand.is_file():
+                    text = str(cand.resolve())
+                    break
+            else:
+                # scenario subfolders: samples/<scenario>/<file>
+                name = Path(text).name
+                if SAMPLES_DIR.is_dir() and name:
+                    for sub in SAMPLES_DIR.iterdir():
+                        if sub.is_dir():
+                            hit = sub / name
+                            if hit.is_file():
+                                text = str(hit.resolve())
+                                break
     except Exception:
         pass
     return text.strip()
@@ -309,48 +351,197 @@ class StepList(Static):
 
 
 class GTDiagnosticTUI(App[None]):
-    """Full-screen terminal UI for GT Diagnostic Harness."""
+    """Full-screen modern terminal workspace for GT Diagnostic Harness."""
 
     TITLE = "GT Diagnostic Harness"
-    SUB_TITLE = "Local gas turbine diagnostics · TUI"
+    SUB_TITLE = "Local · offline-capable gas turbine diagnostics"
+    # Industrial dark workspace: command strip + setup / results cockpit
     CSS = """
     Screen {
         layout: vertical;
+        background: $background;
     }
+    /* ── Top command chrome ───────────────────────────────── */
+    #command-strip {
+        height: auto;
+        min-height: 3;
+        dock: top;
+        layout: horizontal;
+        background: $boost;
+        border-bottom: tall $accent;
+        padding: 0 1;
+        align: left middle;
+    }
+    #brand {
+        width: auto;
+        min-width: 18;
+        color: $accent;
+        text-style: bold;
+        padding: 0 1 0 0;
+        content-align: left middle;
+    }
+    #status-chips {
+        width: 1fr;
+        height: auto;
+        min-height: 1;
+        color: $text-muted;
+        content-align: left middle;
+        padding: 0 1;
+    }
+    #command-actions {
+        width: auto;
+        height: auto;
+        layout: horizontal;
+        align: right middle;
+    }
+    #command-actions Button {
+        margin: 0 0 0 1;
+        min-width: 12;
+    }
+    /* ── Main split ───────────────────────────────────────── */
     #main {
         height: 1fr;
         layout: horizontal;
+        padding: 0 0;
     }
     #left {
-        width: 42%;
-        min-width: 36;
-        border: solid $accent;
-        padding: 0 1;
+        width: 38%;
+        min-width: 34;
+        max-width: 56;
+        border: round $accent 60%;
+        background: $surface;
+        padding: 0 1 1 1;
         overflow-y: auto;
+        scrollbar-gutter: stable;
     }
     #right {
         width: 1fr;
-        border: solid $primary;
-        padding: 0 1;
+        border: round $primary 50%;
+        background: $panel;
+        padding: 0 1 0 1;
         layout: vertical;
+    }
+    .pane-heading {
+        height: 1;
+        text-style: bold;
+        color: $accent;
+        background: $boost;
+        padding: 0 1;
+        margin: 0 0 1 0;
+    }
+    .section-title {
+        text-style: bold;
+        color: $secondary;
+        margin-top: 1;
+        margin-bottom: 0;
+    }
+    .section-hint {
+        color: $text-muted;
+        margin-bottom: 0;
+        height: auto;
+    }
+    #csv-row {
+        height: auto;
+        margin: 0 0 1 0;
+    }
+    #csv-path {
+        width: 1fr;
+        border: tall $surface;
+    }
+    #btn-browse {
+        width: auto;
+        min-width: 12;
+        margin-left: 1;
+    }
+    #sample-select {
+        width: 100%;
+        margin-bottom: 1;
+    }
+    #btn-row {
+        height: auto;
+        margin: 1 0;
+        layout: horizontal;
+    }
+    #btn-row Button {
+        margin-right: 1;
+    }
+    Button {
+        margin-right: 0;
+    }
+    TextArea {
+        height: 6;
+        border: tall $surface;
+    }
+    #context {
+        height: 7;
+    }
+    #corrections {
+        height: 5;
+    }
+    #history {
+        height: 10;
+        border: tall $surface;
+        background: $panel;
+        padding: 0 1;
+    }
+    /* ── Results / proof plots ────────────────────────────── */
+    #results-heading {
+        height: 1;
+        text-style: bold;
+        color: $primary;
+        background: $boost;
+        padding: 0 1;
+        margin: 0 0 0 0;
     }
     #report-scroll {
         height: 1fr;
         min-height: 6;
         overflow-y: auto;
+        scrollbar-gutter: stable;
+    }
+    #evidence-title {
+        height: auto;
+        color: $warning;
+        text-style: bold;
+        margin: 1 0 0 0;
+        padding: 0 1;
+        background: $boost;
+    }
+    #evidence-plots {
+        height: auto;
+        max-height: 48;
+        min-height: 8;
+        padding: 0 1 1 1;
+        background: $background;
+        border: tall $warning;
+        margin: 0 0 1 0;
+        overflow-y: auto;
+        overflow-x: auto;
+        scrollbar-gutter: stable;
+        color: $text;
+        text-style: none;
+    }
+    #report-label {
+        height: 1;
+        color: $accent;
+        text-style: bold;
+        padding: 0 1;
+        background: $boost;
+        margin-top: 0;
     }
     #report {
         height: auto;
         margin-bottom: 1;
+        padding: 0 1;
     }
     #live-panel {
-        height: 14;
-        min-height: 10;
-        max-height: 18;
+        height: 12;
+        min-height: 8;
+        max-height: 16;
         border-top: heavy $accent;
-        background: $panel;
+        background: $surface;
         layout: vertical;
-        padding: 0 0 0 0;
+        padding: 0;
     }
     #live-title {
         height: 1;
@@ -361,16 +552,17 @@ class GTDiagnosticTUI(App[None]):
     }
     #live-log {
         height: 1fr;
-        min-height: 8;
+        min-height: 6;
         padding: 0 1;
         scrollbar-gutter: stable;
     }
+    /* ── Progress dock ────────────────────────────────────── */
     #progress-panel {
         height: auto;
-        max-height: 10;
-        border-top: solid $surface;
+        max-height: 9;
+        border-top: tall $primary;
         padding: 0 1 0 1;
-        background: $surface;
+        background: $boost;
     }
     #progress-title {
         text-style: bold;
@@ -380,7 +572,7 @@ class GTDiagnosticTUI(App[None]):
     }
     #step-list {
         height: auto;
-        max-height: 4;
+        max-height: 3;
         color: $text-muted;
         margin: 0;
         overflow-y: auto;
@@ -389,42 +581,27 @@ class GTDiagnosticTUI(App[None]):
         width: 100%;
         height: 1;
         margin: 0;
+        color: $success;
     }
     #status {
         height: auto;
         max-height: 2;
         color: $text-muted;
     }
-    .section-title {
+    /* Severity accent states on chips */
+    #status-chips.sev-critical {
+        color: $error;
         text-style: bold;
-        color: $accent;
-        margin-top: 1;
     }
-    #btn-row {
-        height: auto;
-        margin: 1 0;
+    #status-chips.sev-high {
+        color: $warning;
+        text-style: bold;
     }
-    #csv-row {
-        height: auto;
-        margin: 0 0 1 0;
+    #status-chips.sev-elevated {
+        color: $warning;
     }
-    #csv-path {
-        width: 1fr;
-    }
-    #btn-browse {
-        width: auto;
-        min-width: 12;
-        margin-left: 1;
-    }
-    Button {
-        margin-right: 1;
-    }
-    TextArea {
-        height: 8;
-    }
-    #history {
-        height: 12;
-        border: solid $surface;
+    #status-chips.sev-normal {
+        color: $success;
     }
     """
 
@@ -449,56 +626,90 @@ class GTDiagnosticTUI(App[None]):
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
+        # Always-visible modern command chrome
+        with Horizontal(id="command-strip"):
+            yield Static("GT HARNESS", id="brand")
+            yield Static(
+                "MODE · Alerts   ·  SEV · —   ·  ENGINE · —   ·  MODELS · loading…",
+                id="status-chips",
+            )
+            with Horizontal(id="command-actions"):
+                yield Button("Run diagnosis", variant="primary", id="btn-run")
+                yield Button("Save & Learn", variant="success", id="btn-save")
+                yield Button("New session", id="btn-new", variant="warning")
         with Horizontal(id="main"):
             with VerticalScroll(id="left"):
+                yield Static("SETUP  ·  input & learn", classes="pane-heading")
+                yield Label("Sensor CSV", classes="section-title")
                 yield Label(
-                    "Sensor CSV  ·  drop onto box  ·  Browse / Ctrl+O  ·  or paste path",
-                    classes="section-title",
+                    "Drop onto box · Browse / Ctrl+O · paste path · or pick a sample",
+                    classes="section-hint",
                 )
                 yield CsvDropZone(id="csv-drop")
                 with Horizontal(id="csv-row"):
                     yield Input(
                         value=DEFAULT_CSV,
-                        placeholder=r'Full path appears here after drop / Browse…',
+                        placeholder=r"Full path after drop / Browse…",
                         id="csv-path",
                     )
                     yield Button("Browse…", id="btn-browse", variant="default")
+                yield Label("Sample scenarios", classes="section-title")
+                sample_opts = list_sample_csv_options()
+                yield Select(
+                    sample_opts if sample_opts else [("No samples found", "")],
+                    prompt="Load a sample CSV…",
+                    id="sample-select",
+                    allow_blank=True,
+                )
                 yield Label("Diagnostic mode", classes="section-title")
                 with RadioSet(id="mode"):
                     yield RadioButton("Alerts", value=True, id="mode-alerts")
                     yield RadioButton("Trips/Event", id="mode-trips")
-                yield Label("Additional Context / Process Maps", classes="section-title")
+                yield Label("Context / process maps / SOE", classes="section-title")
                 yield TextArea(
                     "Alarm text, trip first-outs, SOE notes, process-map excerpts…",
                     id="context",
                 )
                 with Horizontal(id="btn-row"):
-                    yield Button("Run diagnosis", variant="primary", id="btn-run")
-                    yield Button("Save & Learn", variant="success", id="btn-save")
-                    yield Button("New session", id="btn-new", variant="warning")
                     yield Button("Refresh history", id="btn-hist")
                     yield Button("Quit", variant="error", id="btn-quit")
-                yield Label("User corrections (for Save & Learn)", classes="section-title")
+                yield Rule()
+                yield Label("User corrections (Save & Learn)", classes="section-title")
                 yield TextArea("", id="corrections")
                 yield Label("Session history", classes="section-title")
                 yield Markdown("_Loading history…_", id="history")
             with Vertical(id="right"):
-                yield Label(
-                    "Report (scroll) · Final → Reasoning/Hypotheses → Self-review → Evidence",
-                    classes="section-title",
+                yield Static(
+                    "RESULTS  ·  Final → Proof plots → Reasoning → Evidence",
+                    id="results-heading",
+                    classes="pane-heading",
                 )
                 with VerticalScroll(id="report-scroll"):
+                    yield Label(
+                        "Proof plots — channels the detector blames (▲ = flagged)",
+                        id="evidence-title",
+                    )
+                    yield Static(
+                        "Awaiting diagnosis…\n\n"
+                        "Top anomaly channels will plot here as visual proof\n"
+                        "alongside the written report (▲ marks flagged samples).",
+                        id="evidence-plots",
+                    )
+                    yield Label("Write-up", id="report-label")
                     yield Markdown(
-                        "_Run a diagnosis to see results._\n\n"
-                        "Keys: **Ctrl+R** run · **Ctrl+S** save · **Q** quit\n\n"
-                        "While running, **LIVE OUTPUT** streams in the panel below this report.\n"
-                        "When finished, the **full write-up** replaces the text above.",
+                        "_Modern workspace ready._\n\n"
+                        "1. Pick a **sample** or drop a CSV  \n"
+                        "2. Choose **Alerts** or **Trips/Event**  \n"
+                        "3. **Run diagnosis** (Ctrl+R) from the command bar  \n\n"
+                        "After a run you get:\n"
+                        "- **Proof plots** of issue channels (panel above)\n"
+                        "- **Final report** + reasoning trail\n"
+                        "- **Live stream** of each pipeline step below\n",
                         id="report",
                     )
-                # Live stream sits at the bottom of the right column (always visible)
                 with Vertical(id="live-panel"):
                     yield Label(
-                        "▼ LIVE OUTPUT (updates as each step finishes)",
+                        "LIVE PIPELINE  ·  streams as each step finishes",
                         id="live-title",
                     )
                     yield RichLog(
@@ -518,6 +729,7 @@ class GTDiagnosticTUI(App[None]):
 
     def on_mount(self) -> None:
         ensure_directories()
+        self._set_status_chips(models="loading…")
         self._set_plan(list(LOAD_STEPS), title="Startup · loading models")
         self._update_progress(
             step_i=0,
@@ -528,12 +740,42 @@ class GTDiagnosticTUI(App[None]):
         try:
             log = self.query_one("#live-log", RichLog)
             log.clear()
-            log.write("[bold]Live output ready.[/] Step results will appear here during Run diagnosis.")
+            log.write("[bold]Live workspace ready.[/] Pipeline steps stream here during Run diagnosis.")
             log.write("Startup: loading models…")
         except Exception as exc:  # noqa: BLE001
             logger.debug("live-log init: %s", exc)
         # Separate group so diagnosis can still queue cleanly after load
         self.load_models_worker()
+
+    def _set_status_chips(
+        self,
+        *,
+        mode: Optional[str] = None,
+        severity: Optional[str] = None,
+        level: Optional[str] = None,
+        engine: Optional[str] = None,
+        models: Optional[str] = None,
+    ) -> None:
+        """Update the modern status chip strip under the brand."""
+        try:
+            chips = self.query_one("#status-chips", Static)
+        except Exception:
+            return
+        mode_s = mode if mode is not None else self._selected_mode()
+        sev_s = severity if severity is not None else "—"
+        eng_s = engine if engine is not None else "—"
+        mod_s = models if models is not None else ("ready" if self._models_ready else "…")
+        text = (
+            f"MODE · {mode_s}   ·  SEV · {sev_s}   ·  "
+            f"ENGINE · {eng_s}   ·  MODELS · {mod_s}"
+        )
+        chips.update(text)
+        # Severity color class
+        for cls in ("sev-critical", "sev-high", "sev-elevated", "sev-normal", "sev-mild"):
+            chips.remove_class(cls)
+        lvl = (level or "").lower()
+        if lvl in {"critical", "high", "elevated", "normal", "mild"}:
+            chips.add_class(f"sev-{lvl}" if lvl != "mild" else "sev-elevated")
 
     # ── Progress UI helpers ──────────────────────────────────────────────
 
@@ -807,6 +1049,7 @@ class GTDiagnosticTUI(App[None]):
         if err:
             self._models_ready = False
             self.query_one("#status", StatusBar).update(f"Model load error: {err}")
+            self._set_status_chips(models="error")
             self.notify(err, severity="error")
             return
         self._bundle = bundle
@@ -816,18 +1059,39 @@ class GTDiagnosticTUI(App[None]):
         emb = str(st.get("embeddings", ""))[:40]
         ts = str(st.get("tspulse", ""))[:40]
         clf = str(st.get("tspulse_clf", ""))[:40]
+        llm_short = "gguf" if "ok" in llm.lower() or "llama" in llm.lower() else (llm[:24] or "n/a")
         self.query_one("#status", StatusBar).update(
             f"Ready · LLM: {llm} · TS: {ts} · Clf: {clf} · Emb: {emb}"
         )
         self.query_one("#progress-title", Label).update("Ready · idle")
+        self._set_status_chips(models=llm_short, severity="—", engine="—")
         self.action_refresh_history()
 
     def _selected_mode(self) -> str:
-        rs = self.query_one("#mode", RadioSet)
-        pressed = rs.pressed_button
-        if pressed and "trip" in (pressed.id or ""):
-            return "Trips/Event"
+        try:
+            rs = self.query_one("#mode", RadioSet)
+            pressed = rs.pressed_button
+            if pressed and "trip" in (pressed.id or ""):
+                return "Trips/Event"
+        except Exception:
+            pass
         return "Alerts"
+
+    @on(Select.Changed, "#sample-select")
+    def on_sample_select_changed(self, event: Select.Changed) -> None:
+        """Load a shipped sample CSV from the modern scenario picker."""
+        val = event.value
+        # Select.BLANK / NULL are falsey sentinels for “no selection”
+        if val is None or val is Select.BLANK or val is Select.NULL or val == "":
+            return
+        path = str(val)
+        if path and Path(path).is_file():
+            self._set_csv_path(path, notify=True)
+            self._set_status_chips(mode=self._selected_mode())
+
+    @on(RadioSet.Changed, "#mode")
+    def on_mode_changed(self, event: RadioSet.Changed) -> None:
+        self._set_status_chips(mode=self._selected_mode())
 
     @on(Button.Pressed, "#btn-run")
     def on_run_pressed(self) -> None:
@@ -867,6 +1131,15 @@ class GTDiagnosticTUI(App[None]):
         except Exception as exc:  # noqa: BLE001
             logger.warning("clear report failed: %s", exc)
         try:
+            self.query_one("#evidence-plots", Static).update(
+                "_New session — proof plots cleared. Run a diagnosis to regenerate._"
+            )
+            self.query_one("#evidence-title", Label).update(
+                "Proof plots — channels the detector blames (▲ = flagged)"
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("clear evidence plots: %s", exc)
+        try:
             log = self.query_one("#live-log", RichLog)
             log.clear()
             log.write("[bold]New session[/] — live output cleared.")
@@ -881,6 +1154,13 @@ class GTDiagnosticTUI(App[None]):
             self._plan_steps = []
             self.query_one("#step-list", StepList).set_steps([], active=-1, done_all=False)
             self.query_one("#progress-bar", ProgressBar).update(total=100, progress=0)
+            self._set_status_chips(
+                mode=self._selected_mode(),
+                severity="—",
+                level="normal",
+                engine="—",
+                models="ready" if self._models_ready else "…",
+            )
         except Exception as exc:  # noqa: BLE001
             logger.debug("clear progress UI: %s", exc)
         self.notify("New session — report and live output cleared", severity="information")
@@ -972,11 +1252,41 @@ class GTDiagnosticTUI(App[None]):
         if err:
             self.query_one("#status", StatusBar).update(f"Error: {err}")
             self.query_one("#report", Markdown).update(f"**Diagnosis failed**\n\n`{err}`")
+            try:
+                self.query_one("#evidence-plots", Static).update(
+                    f"_Diagnosis failed — no proof plots._\n`{err}`"
+                )
+            except Exception:
+                pass
             self.notify(err, severity="error")
             return
         self._last_result = result
         sev = score_severity(result.anomaly)
-        # Operator-first markdown: Final report, then reasoning trail, then evidence
+        # Proof plots panel (monospace ASCII — better than Markdown for charts)
+        try:
+            plots = ""
+            if getattr(result, "evidence", None) is not None:
+                plots = (result.evidence.ascii_art or "").strip()
+            if not plots:
+                plots = (
+                    "No proof plots for this run "
+                    "(no scored channels or non-numeric data)."
+                )
+            self.query_one("#evidence-plots", Static).update(plots)
+            ch_n = 0
+            if getattr(result, "evidence", None) and result.evidence.channels:
+                ch_n = len(result.evidence.channels)
+                names = ", ".join(c.name for c in result.evidence.channels[:4])
+                self.query_one("#evidence-title", Label).update(
+                    f"Proof plots — {ch_n} channel(s): {names}  (▲ = flagged)"
+                )
+            else:
+                self.query_one("#evidence-title", Label).update(
+                    "Proof plots — no channels selected"
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("evidence plot UI update failed: %s", exc)
+        # Operator-first markdown: Final → plots (also embedded) → reasoning → evidence
         try:
             body = result.to_display_markdown()
         except Exception:
@@ -985,7 +1295,8 @@ class GTDiagnosticTUI(App[None]):
             f"**Severity: {sev['label']}** · "
             f"level=`{sev['level']}` · score=`{sev['severity']}` · "
             f"top=`{sev['top_channel']}` · engine=`{result.anomaly.get('mode')}`\n\n"
-            f"_Scroll down for Final report → Hypotheses → Self-review → Evidence._\n\n"
+            f"_Scroll: Final report → Proof plots (panel above + section 2) → "
+            f"Reasoning → Evidence._\n\n"
             "---\n\n"
         )
         body = header + body
@@ -995,13 +1306,20 @@ class GTDiagnosticTUI(App[None]):
         self.query_one("#report", Markdown).update(body)
         try:
             log = self.query_one("#live-log", RichLog)
-            log.write("[bold green]✓ Full report written above — scroll the report pane[/]")
+            log.write("[bold green]✓ Full report + proof plots written above — scroll the report pane[/]")
             log.write(
                 f"Severity {sev['severity']} ({sev['level']}) · engine={result.anomaly.get('mode')}"
             )
+            if getattr(result, "evidence", None) and result.evidence.channels:
+                log.write(
+                    "[cyan]Proof channels:[/] "
+                    + ", ".join(
+                        f"{c.name}({c.score:.2f})" for c in result.evidence.channels
+                    )
+                )
         except Exception:
             pass
-        # Scroll report pane to top so Final report is visible
+        # Scroll report pane to top so Final report + plots are visible
         try:
             self.query_one("#report-scroll", VerticalScroll).scroll_home(animate=False)
         except Exception:
@@ -1015,19 +1333,35 @@ class GTDiagnosticTUI(App[None]):
             out_dir = PROJECT_ROOT / "logs"
             out_dir.mkdir(parents=True, exist_ok=True)
             report_path = out_dir / "last_diagnosis_report.md"
+            # Prefer full report with plots; also drop a .txt plots sidecar
             report_path.write_text(body, encoding="utf-8")
+            plots_path = out_dir / "last_evidence_plots.txt"
+            plots_txt = ""
+            if getattr(result, "evidence", None) is not None:
+                plots_txt = (result.evidence.ascii_art or "").strip()
+            if plots_txt:
+                plots_path.write_text(plots_txt + "\n", encoding="utf-8")
             logger.info("Wrote full report to %s", report_path)
         except Exception as exc:  # noqa: BLE001
             logger.debug("Could not write report file: %s", exc)
-        self.query_one("#progress-title", Label).update("Diagnosis complete — scroll report")
+        self.query_one("#progress-title", Label).update(
+            "Diagnosis complete — scroll report + proof plots"
+        )
         path_hint = f" · saved {report_path.name}" if report_path else ""
         self.query_one("#status", StatusBar).update(
             f"Done · severity={sev['severity']} ({sev['level']}) · "
-            f"scroll right pane for Final + Reasoning + Self-review{path_hint}"
+            f"proof plots + Final + Reasoning in right pane{path_hint}"
+        )
+        self._set_status_chips(
+            mode=result.mode if getattr(result, "mode", None) else self._selected_mode(),
+            severity=f"{sev['level']} ({sev['severity']})",
+            level=str(sev.get("level") or ""),
+            engine=str(result.anomaly.get("mode") or "n/a"),
+            models="ready",
         )
         self.notify(
-            f"Diagnosis complete — {sev['label']}. Scroll the report pane "
-            f"(also in logs/last_diagnosis_report.md).",
+            f"Diagnosis complete — {sev['label']}. Proof plots + write-up in the "
+            f"report pane (also logs/last_diagnosis_report.md).",
             severity="information",
         )
 
