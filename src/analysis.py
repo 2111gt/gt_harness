@@ -32,6 +32,7 @@ from .models import (
     llm_available,
     offline_reflect,
 )
+from .evidence_plots import EvidenceBundle, build_evidence_bundle, evidence_to_markdown
 from .tools import (
     KnowledgeRAG,
     dataframe_preview,
@@ -146,15 +147,22 @@ class AnalysisResult:
     model_status: Dict[str, str] = field(default_factory=dict)
     preview: str = ""
     profile: Dict[str, Any] = field(default_factory=dict)
+    evidence: Optional[EvidenceBundle] = None
 
     def to_markdown(self) -> str:
         """Full report — operator-first order for TUI / CLI."""
         return self.to_display_markdown()
 
+    def evidence_ascii(self) -> str:
+        """Terminal proof plots for the channels the detector blamed."""
+        if self.evidence is None:
+            return ""
+        return (self.evidence.ascii_art or "").strip()
+
     def to_display_markdown(self) -> str:
         """
-        Human-facing report: final answer first, then reasoning trail,
-        then supporting evidence. Scrollable in the TUI.
+        Human-facing report: final answer first, proof plots, then reasoning
+        trail and supporting evidence. Scrollable in the TUI.
         """
         top = self.anomaly.get("anomalies") or []
         top_lines = []
@@ -197,6 +205,14 @@ class AnalysisResult:
         else:
             clf_block = "_Classifier not run or unavailable._"
 
+        if self.evidence is not None:
+            proof_md = evidence_to_markdown(self.evidence)
+        else:
+            proof_md = (
+                "## Proof plots (sensor evidence)\n\n"
+                "_Proof plots were not generated for this run._\n"
+            )
+
         return f"""# GT Diagnostic Report
 
 **Mode:** `{self.mode}`  
@@ -211,7 +227,16 @@ class AnalysisResult:
 
 ---
 
-# 2. Reasoning, hypotheses & self-review (LLM draft)
+# 2. Proof plots — visual evidence
+
+Sensor traces for the channels the anomaly engine ranked highest
+(with ▲ on flagged samples). Use these as proof alongside the write-up.
+
+{proof_md}
+
+---
+
+# 3. Reasoning, hypotheses & self-review (LLM draft)
 
 The model’s first-pass reasoning trail (before packaging / reflection):
 
@@ -219,13 +244,13 @@ The model’s first-pass reasoning trail (before packaging / reflection):
 
 ---
 
-# 3. Self-review / reflection notes
+# 4. Self-review / reflection notes
 
 {reflection}
 
 ---
 
-# 4. Evidence
+# 5. Evidence details
 
 ## Anomaly summary
 {self.anomaly.get('summary', '')}
@@ -317,7 +342,9 @@ def run_diagnosis(
         cfg = LLMConfig(
             n_ctx=max(cfg.n_ctx, 2048),
             n_threads=cfg.resolved_threads(),
-            n_gpu_layers=cfg.n_gpu_layers,
+            n_gpu_layers=cfg.resolved_n_gpu_layers()
+            if hasattr(cfg, "resolved_n_gpu_layers")
+            else cfg.n_gpu_layers,
             temperature=cfg.temperature,
             max_tokens=max(cfg.max_tokens, 512),
             top_p=cfg.top_p,
@@ -460,6 +487,32 @@ def run_diagnosis(
         f"{clf_md}",
     )
 
+    # --- Proof plots (top issue channels as visual evidence) ---
+    try:
+        evidence = build_evidence_bundle(
+            df,
+            anomaly,
+            max_channels=4,
+            width=96,
+            height=16,
+            max_points=240,
+        )
+        if evidence.channels:
+            names = ", ".join(c.name for c in evidence.channels)
+            _live(
+                "plots",
+                f"**Proof plots ready** for: `{names}`\n\n"
+                "Full ASCII charts appear under *Proof plots* in the report pane.",
+            )
+        else:
+            _live("plots", "_No proof plots (no scored channels)._")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Evidence plots failed: %s", exc)
+        evidence = EvidenceBundle(
+            note=f"Plot build failed: {exc}",
+            ascii_art=f"_Proof plots unavailable: {exc}_",
+        )
+
     # --- RAG (signature-aware; trips also pull similar prior alerts) ---
     _live("step", "### Step: knowledge retrieval (RAG)…")
     _begin_step(2, "knowledge + prior cases")
@@ -594,6 +647,7 @@ def run_diagnosis(
         model_status=dict(bundle.status or {}),
         preview=preview,
         profile=profile,
+        evidence=evidence,
     )
 
 

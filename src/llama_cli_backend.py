@@ -46,6 +46,7 @@ class LlamaCliRunner:
         n_threads: int = 4,
         temperature: float = 0.2,
         max_tokens: int = 1024,
+        n_gpu_layers: int = 0,
     ) -> None:
         # Always absolute: generate() sets cwd to the binary folder so DLLs load,
         # and a relative models\*.gguf path would break under that cwd (TUI hang /
@@ -56,6 +57,7 @@ class LlamaCliRunner:
         self.n_threads = n_threads
         self.temperature = temperature
         self.max_tokens = max_tokens
+        self.n_gpu_layers = max(0, int(n_gpu_layers or 0))
         self.backend = "llama-cli"
 
     def create_chat_completion(
@@ -111,18 +113,33 @@ class LlamaCliRunner:
 
         last_err = ""
         n_threads = max(1, int(self.n_threads))
+        ngl = max(0, int(self.n_gpu_layers or 0))
+        # GPU offload when n_gpu_layers > 0 (CUDA build of llama.cpp)
+        gpu_flags: List[str] = []
+        if ngl > 0:
+            gpu_flags = ["-ngl", str(ngl)]
         # One preferred arg set; only fall back if the binary rejects flags.
         preferred_extra = [
             "-t",
             str(n_threads),
             "-tb",
             str(n_threads),
+            *gpu_flags,
             "--temp",
             str(temperature),
             "-no-cnv",
             "--no-display-prompt",
         ]
         minimal_extra = [
+            "-t",
+            str(n_threads),
+            *gpu_flags,
+            "--temp",
+            str(temperature),
+            "-no-cnv",
+        ]
+        # CPU-only retry if GPU flags are rejected by a CPU-only binary
+        cpu_only_extra = [
             "-t",
             str(n_threads),
             "--temp",
@@ -144,15 +161,18 @@ class LlamaCliRunner:
             env["LLAMA_LOG_VERBOSITY"] = env.get("LLAMA_LOG_VERBOSITY", "1")
             env.setdefault("TERM", "dumb")
 
-            # At most a few attempts — each reloads ~5GB GGUF on CPU.
+            # At most a few attempts — each reloads ~5GB GGUF on CPU/GPU.
             attempts: List[Tuple[Path, List[str], List[str]]] = []
             for binary in candidates[:2]:
                 attempts.append((binary, preferred_extra, ["-f", str(prompt_path)]))
                 attempts.append((binary, minimal_extra, ["-f", str(prompt_path)]))
+                if ngl > 0:
+                    # CPU binary may reject -ngl — retry without GPU flags
+                    attempts.append((binary, cpu_only_extra, ["-f", str(prompt_path)]))
             # Last resort: short -p (may truncate long prompts)
             if candidates:
                 attempts.append(
-                    (candidates[0], minimal_extra, ["-p", prompt[:3500]])
+                    (candidates[0], minimal_extra if ngl == 0 else cpu_only_extra, ["-p", prompt[:3500]])
                 )
 
             seen_cmds: Set[Tuple[str, Tuple[str, ...], Tuple[str, ...]]] = set()
@@ -225,14 +245,29 @@ class LlamaCliRunner:
         raise RuntimeError(f"llama.cpp CLI produced empty output: {last_err}")
 
 
-def ensure_llama_cli_binary(force: bool = False) -> Optional[Path]:
+def ensure_llama_cli_binary(
+    force: bool = False,
+    *,
+    prefer_cuda: bool = False,
+) -> Optional[Path]:
     """
-    Ensure official llama-cli.exe exists under models/llama-cpp-bin/.
-    Downloads the win-cpu-x64 zip when missing.
+    Ensure llama-cli / llama-completion exists under models/llama-cpp-bin/.
+
+    When ``prefer_cuda`` is True, prefer a CUDA-named binary already on disk
+    (or under a cuda/ subfolder). Downloads the portable **CPU** zip when no
+    binary is present (CUDA zips are large/driver-specific — place a CUDA build
+    manually or use llama-cpp-python with CUDA).
     """
     ensure_directories()
     BIN_DIR.mkdir(parents=True, exist_ok=True)
-    existing = _find_cli(BIN_DIR)
+
+    if prefer_cuda:
+        cuda_hit = _find_cli(BIN_DIR, prefer_cuda=True)
+        if cuda_hit and not force:
+            logger.info("Using CUDA-ish llama binary: %s", cuda_hit)
+            return cuda_hit
+
+    existing = _find_cli(BIN_DIR, prefer_cuda=False)
     if existing and not force:
         return existing
 
@@ -243,19 +278,22 @@ def ensure_llama_cli_binary(force: bool = False) -> Optional[Path]:
         "on",
     }:
         logger.warning("llama-cli missing and downloads disabled")
-        return existing
+        return _find_cli(BIN_DIR, prefer_cuda=prefer_cuda) or existing
 
-    zip_path = BIN_DIR / f"llama-{LLAMA_CPP_RELEASE}-win-cpu-x64.zip"
-    logger.info("Downloading official llama.cpp CPU binary: %s", LLAMA_CPP_ZIP_URL)
+    # Optional: user can set GT_LLAMA_CPP_ZIP_URL to a CUDA build URL
+    zip_url = (os.environ.get("GT_LLAMA_CPP_ZIP_URL") or "").strip() or LLAMA_CPP_ZIP_URL
+    zip_name = zip_url.rstrip("/").split("/")[-1] or f"llama-{LLAMA_CPP_RELEASE}-win-cpu-x64.zip"
+    zip_path = BIN_DIR / zip_name
+    logger.info("Downloading llama.cpp binary: %s", zip_url)
     try:
-        urlretrieve(LLAMA_CPP_ZIP_URL, zip_path)
+        urlretrieve(zip_url, zip_path)
         with zipfile.ZipFile(zip_path, "r") as zf:
             zf.extractall(BIN_DIR)
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to download llama.cpp binary: %s", exc)
-        return _find_cli(BIN_DIR)
+        return _find_cli(BIN_DIR, prefer_cuda=prefer_cuda)
 
-    return _find_cli(BIN_DIR)
+    return _find_cli(BIN_DIR, prefer_cuda=prefer_cuda)
 
 
 def try_load_llama_cli(
@@ -265,6 +303,7 @@ def try_load_llama_cli(
     n_threads: int = 4,
     temperature: float = 0.2,
     max_tokens: int = 384,
+    n_gpu_layers: int = 0,
 ) -> tuple[Optional[LlamaCliRunner], str]:
     """
     Build a LlamaCliRunner for the given GGUF, downloading CLI if needed.
@@ -272,7 +311,8 @@ def try_load_llama_cli(
     By default skips a full GGUF smoke generation (reloading 5GB is slow).
     Set GT_LLAMA_SMOKE=1 to force a short generate on bind.
     """
-    cli = ensure_llama_cli_binary()
+    prefer_cuda = int(n_gpu_layers or 0) > 0
+    cli = ensure_llama_cli_binary(prefer_cuda=prefer_cuda)
     if cli is None:
         return None, "llama-cli binary not available"
 
@@ -286,8 +326,10 @@ def try_load_llama_cli(
         n_threads=n_threads,
         temperature=temperature,
         max_tokens=max_tokens,
+        n_gpu_layers=n_gpu_layers,
     )
 
+    gpu_tag = f" n_gpu_layers={n_gpu_layers}" if n_gpu_layers > 0 else " CPU"
     smoke_flag = (os.environ.get("GT_LLAMA_SMOKE") or "").strip().lower()
     if smoke_flag in {"1", "true", "yes", "on"}:
         try:
@@ -295,7 +337,8 @@ def try_load_llama_cli(
             sample = (smoke.get("choices") or [{}])[0].get("text", "")
             return (
                 runner,
-                f"Loaded GGUF via llama-cli ({cli.name}): {Path(model_path).name} smoke={sample[:40]!r}",
+                f"Loaded GGUF via llama-cli ({cli.name}{gpu_tag}): "
+                f"{Path(model_path).name} smoke={sample[:40]!r}",
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("llama-cli smoke test failed: %s", exc)
@@ -304,24 +347,47 @@ def try_load_llama_cli(
     # Fast path: binary + GGUF present (smoke deferred to first real generate)
     return (
         runner,
-        f"Loaded GGUF via llama-cli ({cli.name}): {Path(model_path).name} (ready, smoke skipped)",
+        f"Loaded GGUF via llama-cli ({cli.name}{gpu_tag}): "
+        f"{Path(model_path).name} (ready, smoke skipped)",
     )
 
 
-def _find_cli(root: Path) -> Optional[Path]:
+def _find_cli(root: Path, *, prefer_cuda: bool = False) -> Optional[Path]:
     if not root.exists():
         return None
-    for name in (
+    names = (
         "llama-completion.exe",
         "llama-completion",
         "llama-cli.exe",
         "llama-cli",
         "main.exe",
-    ):
-        hits = list(root.rglob(name))
-        if hits:
-            return hits[0].resolve()
-    return None
+    )
+    hits: List[Path] = []
+    for name in names:
+        hits.extend(root.rglob(name))
+    if not hits:
+        return None
+
+    def score(p: Path) -> Tuple[int, int, str]:
+        s = str(p).lower()
+        cudaish = any(
+            tok in s
+            for tok in (
+                "cuda",
+                "cu12",
+                "cu11",
+                "cublas",
+                "ggml-cuda",
+                "\\cuda\\",
+                "/cuda/",
+            )
+        )
+        # prefer cuda when requested, else prefer non-cuda portable builds
+        rank = 0 if (prefer_cuda and cudaish) or (not prefer_cuda and not cudaish) else 1
+        return (rank, len(s), str(p))
+
+    hits = sorted(set(hits), key=score)
+    return hits[0].resolve()
 
 
 def _messages_to_prompt(messages: List[Dict[str, str]]) -> str:

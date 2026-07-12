@@ -6,17 +6,21 @@ Launch
 ------
     cd gt_harness
     pip install -r requirements.txt
-    python app.py
+    python app.py                      # Textual TUI (default)
+    python app.py --ui ratatui         # Rust ratatui TUI (swap)
+    set GT_UI=ratatui && python app.py # same via env
 
 Optional:
     python app.py --no-download
     python app.py --download-only
-    python app.py --cli-once samples/gt_sensors_demo.csv   # non-interactive diagnosis
+    python app.py --cli-once samples/gt_sensors_demo.csv
+    python app.py --json-once samples/gt_sensors_demo.csv   # bridge for ratatui
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 from typing import Optional
@@ -26,8 +30,10 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.analysis import get_rag, run_diagnosis, score_severity  # noqa: E402
+from src.bridge import run_json_once  # noqa: E402
 from src.models import get_bundle, is_offline_draft, load_models, llm_available  # noqa: E402
 from src.tools import cases_history_markdown, save_case  # noqa: E402
+from src.ui_launch import VALID_UIS, launch_ui, resolve_ui  # noqa: E402
 from src.utils import ensure_directories, setup_logging  # noqa: E402
 
 logger = setup_logging()
@@ -46,7 +52,6 @@ def run_cli_once(
     Prints severity + report markdown to stdout.
     Progress / ETA lines go to stderr so stdout stays machine-readable.
     """
-    import sys
     import time
 
     ensure_directories()
@@ -83,6 +88,13 @@ def run_cli_once(
     print(f"ANOMALY_MODE\t{result.anomaly.get('mode')}")
     print(f"LLM_AVAILABLE\t{llm_available(bundle)}")
     print(f"OFFLINE_DRAFT\t{is_offline_draft(result.draft)}")
+    if getattr(result, "evidence", None) and result.evidence.channels:
+        print(
+            "PROOF_CHANNELS\t"
+            + ",".join(f"{c.name}:{c.score:.3f}" for c in result.evidence.channels)
+        )
+        print("--- PROOF PLOTS ---")
+        print(result.evidence_ascii() or result.evidence.ascii_art or "")
     print("--- REPORT ---")
     print(result.to_markdown())
     if save:
@@ -104,7 +116,16 @@ def run_cli_once(
 
 
 def main(argv: Optional[list] = None) -> int:
-    parser = argparse.ArgumentParser(description="GT Diagnostic Harness (TUI)")
+    parser = argparse.ArgumentParser(
+        description="GT Diagnostic Harness — Textual or ratatui TUI"
+    )
+    parser.add_argument(
+        "--ui",
+        choices=list(VALID_UIS),
+        default=None,
+        help="TUI backend: textual (Python, default) or ratatui (Rust). "
+        "Also set via GT_UI=textual|ratatui",
+    )
     parser.add_argument(
         "--no-download",
         action="store_true",
@@ -121,16 +142,21 @@ def main(argv: Optional[list] = None) -> int:
         help="Run one non-interactive diagnosis on CSV and exit (no TUI)",
     )
     parser.add_argument(
+        "--json-once",
+        metavar="CSV",
+        help="JSON diagnosis bridge for ratatui / external frontends (stdout = one JSON object)",
+    )
+    parser.add_argument(
         "--mode",
         default="Trips/Event",
         choices=["Alerts", "Trips/Event"],
-        help="Mode for --cli-once",
+        help="Mode for --cli-once / --json-once",
     )
-    parser.add_argument("--context", default="", help="Context for --cli-once")
+    parser.add_argument("--context", default="", help="Context for --cli-once / --json-once")
     parser.add_argument(
         "--save",
         action="store_true",
-        help="With --cli-once, also Save & Learn the session",
+        help="With --cli-once/--json-once, also Save & Learn the session",
     )
     parser.add_argument("--skip-model-load", action="store_true", help="(compat) same as defer")
     args = parser.parse_args(argv)
@@ -138,8 +164,6 @@ def main(argv: Optional[list] = None) -> int:
     ensure_directories()
 
     if args.no_download:
-        import os
-
         os.environ["GT_NO_DOWNLOAD"] = "1"
 
     auto_download = not args.no_download
@@ -159,6 +183,15 @@ def main(argv: Optional[list] = None) -> int:
             print(f"  {k}: {v}")
         return 0
 
+    if args.json_once:
+        return run_json_once(
+            args.json_once,
+            mode=args.mode,
+            context=args.context,
+            auto_download=auto_download,
+            save=args.save,
+        )
+
     if args.cli_once:
         return run_cli_once(
             args.cli_once,
@@ -168,13 +201,16 @@ def main(argv: Optional[list] = None) -> int:
             save=args.save,
         )
 
-    # Default: Textual TUI
-    logger.info("Starting GT Diagnostic Harness TUI")
+    try:
+        ui = resolve_ui(args.ui)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
+    logger.info("Starting GT Diagnostic Harness · UI=%s", ui)
     if auto_download:
         logger.info("Auto-download enabled (GGUF / embeddings / TS Pulse if missing)")
-    from src.tui_app import run_tui
-
-    return run_tui(auto_download=auto_download)
+    return launch_ui(ui, auto_download=auto_download)
 
 
 if __name__ == "__main__":

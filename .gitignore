@@ -41,3 +41,7 @@ Thumbs.db
 .env
 .env.*
 !.env.example
+
+# Rust ratatui frontend build artifacts
+tui_ratatui/target/
+**/*.rs.bk

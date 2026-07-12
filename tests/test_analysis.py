@@ -235,11 +235,14 @@ class TestRunDiagnosis(unittest.TestCase):
             self.assertTrue(r.draft)
             self.assertIn("Initial hypotheses", r.draft)
             self.assertTrue(r.reflection)
-            # Display report puts Final first, then reasoning trail
+            # Display report: Final → proof plots → reasoning trail
             display = r.to_display_markdown()
             self.assertIn("1. Final report", display)
-            self.assertIn("2. Reasoning", display)
-            self.assertIn("3. Self-review", display)
+            self.assertIn("2. Proof plots", display)
+            self.assertIn("3. Reasoning", display)
+            self.assertIn("4. Self-review", display)
+            self.assertIsNotNone(r.evidence)
+            self.assertTrue(r.evidence.channels)
             sev = score_severity(r.anomaly)
             self.assertIn(sev["level"], final)
             self.assertIn("score=", final)

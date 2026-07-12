@@ -83,11 +83,12 @@ def _clf_channels_from_env() -> int:
 
 @dataclass
 class LLMConfig:
-    """Settings for llama.cpp Granite chat (tuned for CPU CLI speed)."""
+    """Settings for llama.cpp Granite chat (CPU or CUDA when available)."""
 
     n_ctx: int = 2048  # smaller context → faster prompt eval on CPU
     n_threads: int = 0  # 0 → auto via _default_threads()
-    n_gpu_layers: int = 0  # set >0 if you built llama-cpp with GPU support
+    # -1 → auto: prefer CUDA offload when available (see device.preferred_n_gpu_layers)
+    n_gpu_layers: int = -1
     temperature: float = 0.2
     max_tokens: int = 512  # room for Reasoning / Hypotheses / Self-review / Final
     top_p: float = 0.9
@@ -95,6 +96,13 @@ class LLMConfig:
 
     def resolved_threads(self) -> int:
         return self.n_threads if self.n_threads and self.n_threads > 0 else _default_threads()
+
+    def resolved_n_gpu_layers(self) -> int:
+        if self.n_gpu_layers is not None and self.n_gpu_layers >= 0:
+            return int(self.n_gpu_layers)
+        from .device import preferred_n_gpu_layers
+
+        return preferred_n_gpu_layers()
 
 
 @dataclass
@@ -228,17 +236,19 @@ def load_models(
 
     if load_llm:
         _p(1, "binding GGUF runner")
-        # Apply resolved thread count for CLI backend
-        if not cfg.n_threads:
-            cfg = LLMConfig(
-                n_ctx=cfg.n_ctx,
-                n_threads=cfg.resolved_threads(),
-                n_gpu_layers=cfg.n_gpu_layers,
-                temperature=cfg.temperature,
-                max_tokens=cfg.max_tokens,
-                top_p=cfg.top_p,
-                chat_format=cfg.chat_format,
-            )
+        from .device import device_status_summary
+
+        bundle.status["device"] = device_status_summary()
+        # Apply resolved thread + GPU layer counts
+        cfg = LLMConfig(
+            n_ctx=cfg.n_ctx,
+            n_threads=cfg.resolved_threads(),
+            n_gpu_layers=cfg.resolved_n_gpu_layers(),
+            temperature=cfg.temperature,
+            max_tokens=cfg.max_tokens,
+            top_p=cfg.top_p,
+            chat_format=cfg.chat_format,
+        )
         bundle.llm, bundle.gguf_path, msg = _load_llama(gguf_path, cfg)
         bundle.status["llm"] = msg
         _p(1, msg[:80], within=1.0)
@@ -291,9 +301,12 @@ def _load_llama(
     """
     Load Granite GGUF.
 
-    Prefer official llama-cli when the binary is already on disk (avoids
-    illegal-instruction crashes from some llama-cpp-python wheels on older CPUs
-    and the multi-second recovery path that made TUI load look hung).
+    CUDA preference
+    ---------------
+    When ``n_gpu_layers > 0`` (auto when CUDA is available):
+      1. Try llama-cpp-python with GPU offload first
+      2. Fall back to llama-cli with ``-ngl``
+    When CPU-only: prefer llama-cli (stable on older CPUs), then python binding.
     """
     path = find_gguf_model(gguf_path)
     if path is None:
@@ -304,49 +317,75 @@ def _load_llama(
             "(set GT_NO_DOWNLOAD unset, or place a .gguf / set GT_GGUF_PATH).",
         )
 
-    # --- Prefer llama-cli when binary present (fast bind, works on this host) ---
-    try:
-        from .llama_cli_backend import ensure_llama_cli_binary, try_load_llama_cli
+    n_gpu = cfg.resolved_n_gpu_layers() if hasattr(cfg, "resolved_n_gpu_layers") else int(
+        cfg.n_gpu_layers or 0
+    )
+    # cfg may already have resolved non-negative n_gpu_layers from load_models
+    if cfg.n_gpu_layers is not None and cfg.n_gpu_layers >= 0:
+        n_gpu = int(cfg.n_gpu_layers)
 
-        cli = ensure_llama_cli_binary()
-        if cli is not None:
+    prefer_gpu = n_gpu > 0
+    errors: List[str] = []
+
+    def _try_python() -> Tuple[Optional[Any], str]:
+        try:
+            try:
+                from llama_cpp import Llama  # type: ignore
+            except ImportError:
+                from .download import ensure_python_packages
+
+                ensure_python_packages([("llama-cpp-python", "llama_cpp")], repair=False)
+                from llama_cpp import Llama  # type: ignore
+
+            kwargs: Dict[str, Any] = {
+                "model_path": str(path),
+                "n_ctx": cfg.n_ctx,
+                "n_threads": cfg.resolved_threads(),
+                "n_gpu_layers": n_gpu,
+                "verbose": False,
+            }
+            if cfg.chat_format:
+                kwargs["chat_format"] = cfg.chat_format
+            llm = Llama(**kwargs)
+            tag = f"GPU n_gpu_layers={n_gpu}" if n_gpu > 0 else "CPU"
+            return llm, f"Loaded GGUF via llama-cpp-python ({tag}): {path.name}"
+        except Exception as exc:  # noqa: BLE001
+            msg = f"llama-cpp-python: {exc}"
+            logger.warning("llama-cpp-python GGUF load failed: %s", exc)
+            return None, msg
+
+    def _try_cli() -> Tuple[Optional[Any], str]:
+        try:
+            from .llama_cli_backend import ensure_llama_cli_binary, try_load_llama_cli
+
+            cli = ensure_llama_cli_binary(prefer_cuda=prefer_gpu)
+            if cli is None:
+                return None, "llama-cli binary not available"
             runner, msg = try_load_llama_cli(
                 path,
                 n_ctx=cfg.n_ctx,
                 n_threads=cfg.resolved_threads(),
                 temperature=cfg.temperature,
                 max_tokens=cfg.max_tokens,
+                n_gpu_layers=n_gpu,
             )
-            if runner is not None:
-                return runner, str(path), msg
-            logger.warning("llama-cli bind failed: %s", msg)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("llama-cli path failed: %s", exc)
+            return runner, msg
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("llama-cli path failed: %s", exc)
+            return None, f"llama-cli: {exc}"
 
-    # --- Fallback: llama-cpp-python (may hit illegal instruction on some CPUs) ---
-    try:
-        try:
-            from llama_cpp import Llama  # type: ignore
-        except ImportError:
-            from .download import ensure_python_packages
+    order = (_try_python, _try_cli) if prefer_gpu else (_try_cli, _try_python)
+    for loader in order:
+        obj, msg = loader()
+        if obj is not None:
+            return obj, str(path), msg
+        errors.append(msg)
 
-            ensure_python_packages([("llama-cpp-python", "llama_cpp")], repair=False)
-            from llama_cpp import Llama  # type: ignore
-
-        kwargs: Dict[str, Any] = {
-            "model_path": str(path),
-            "n_ctx": cfg.n_ctx,
-            "n_threads": cfg.resolved_threads(),
-            "n_gpu_layers": cfg.n_gpu_layers,
-            "verbose": False,
-        }
-        if cfg.chat_format:
-            kwargs["chat_format"] = cfg.chat_format
-        llm = Llama(**kwargs)
-        return llm, str(path), f"Loaded GGUF via llama-cpp-python: {path.name}"
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("llama-cpp-python GGUF load failed: %s", exc)
-        return None, str(path), f"GGUF load failed (cli + python): {exc}"
+    return (
+        None,
+        str(path),
+        "GGUF load failed (cli + python): " + " | ".join(errors),
+    )
 
 
 def _load_tspulse(auto_download: bool = True) -> Tuple[Any, str, str]:
@@ -1272,7 +1311,24 @@ def _tspulse_residual(model: Any, chunk: np.ndarray, torch_mod: Any) -> np.ndarr
 
     Raises on failure — callers must not claim mode=tspulse with mean-fallback.
     """
+    # Prefer CUDA when the model (or torch) is on GPU
+    try:
+        from .device import torch_device
+
+        dev = torch_device()
+    except Exception:
+        dev = "cpu"
+    try:
+        p = next(model.parameters())
+        dev = str(p.device)
+    except Exception:
+        pass
+
     x = torch_mod.as_tensor(chunk, dtype=torch_mod.float32).view(1, -1, 1)
+    try:
+        x = x.to(dev)
+    except Exception:
+        pass
     last_err: Optional[Exception] = None
 
     # Stable seed from window content so identical series → identical masks
