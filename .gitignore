@@ -1,0 +1,43 @@
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+
+# Local data / indexes (rebuilt on run)
+.chroma/
+chroma_db/*
+!chroma_db/.gitkeep
+saved_cases/*.json
+!saved_cases/.gitkeep
+logs/*
+!logs/.gitkeep
+
+# Large model weights / binaries (download separately — GitHub 100MB limit)
+models/*.gguf
+models/*.bin
+models/*.safetensors
+models/**/*.gguf
+models/llama-cpp-bin/**
+!models/llama-cpp-bin/.gitkeep
+!models/README.md
+models/.cache/
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# Env / secrets
+.env
+.env.*
+!.env.example
