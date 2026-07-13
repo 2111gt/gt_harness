@@ -7,7 +7,7 @@ What gets ensured
    (avoids MSVC/CMake failures on Windows)
 2. Granite 4.1 8B GGUF → models/ (Hugging Face LFS)
 3. SentenceTransformer embeddings (all-MiniLM-L6-v2) → HF cache
-4. Granite TS Pulse weights → HF cache (optional; statistical fallback if API missing)
+4. Granite TS Pulse weights → models/tspulse/ (like GGUF; statistical fallback if missing)
 
 Environment overrides
 ---------------------
@@ -17,12 +17,14 @@ GT_GGUF_FILE              Filename inside the repo
 GT_GGUF_PATH              Use an existing local GGUF instead of downloading
 GT_TSPULSE_MODEL          HF id for TS Pulse
 GT_TSPULSE_REVISION       HF revision
+GT_TSPULSE_LOCAL_DIR      Override local folder for TS Pulse weights
 GT_EMBEDDING_MODEL        SentenceTransformer model name
 """
 
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -31,6 +33,8 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from .utils import (
     DEFAULT_EMBEDDING_MODEL,
     MODELS_DIR,
+    TSPULSE_CLF_MODELS_DIR,
+    TSPULSE_MODELS_DIR,
     ensure_directories,
     find_gguf_model,
     setup_logging,
@@ -61,6 +65,179 @@ GGUF_FALLBACK_FILES: Tuple[str, ...] = (
 
 DEFAULT_TSPULSE_MODEL = "ibm-granite/granite-timeseries-tspulse-r1"
 DEFAULT_TSPULSE_REVISION = "tspulse-block-ad"
+DEFAULT_TSPULSE_CLF_REVISION = "tspulse-block-dualhead-512-p16-r1"
+
+
+def _safe_path_component(name: str) -> str:
+    """Filesystem-safe folder name from HF id or revision."""
+    text = (name or "default").strip() or "default"
+    text = text.replace("/", "--").replace("\\", "--")
+    text = re.sub(r"[^\w.\-]+", "_", text)
+    return text[:180] or "default"
+
+
+def tspulse_local_dir(
+    model_id: Optional[str] = None,
+    revision: Optional[str] = None,
+) -> Path:
+    """
+    Project-local directory for TS Pulse weights (under models/tspulse/).
+
+    Layout::
+        models/tspulse/<org--repo>/<revision>/
+    """
+    ensure_directories()
+    override = (os.environ.get("GT_TSPULSE_LOCAL_DIR") or "").strip()
+    if override:
+        p = Path(override)
+        p.mkdir(parents=True, exist_ok=True)
+        return p
+    mid = model_id or os.environ.get("GT_TSPULSE_MODEL") or DEFAULT_TSPULSE_MODEL
+    rev = revision if revision is not None else (
+        os.environ.get("GT_TSPULSE_REVISION") or DEFAULT_TSPULSE_REVISION
+    )
+    path = TSPULSE_MODELS_DIR / _safe_path_component(mid) / _safe_path_component(str(rev or "default"))
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def tspulse_clf_local_dir(
+    model_id: Optional[str] = None,
+    revision: Optional[str] = None,
+) -> Path:
+    """Local dir for classification-head scaffold weights under models/tspulse_clf/."""
+    ensure_directories()
+    mid = model_id or os.environ.get("GT_TSPULSE_MODEL") or DEFAULT_TSPULSE_MODEL
+    rev = revision if revision is not None else (
+        os.environ.get("GT_TSPULSE_CLF_REVISION") or DEFAULT_TSPULSE_CLF_REVISION
+    )
+    path = (
+        TSPULSE_CLF_MODELS_DIR
+        / _safe_path_component(mid)
+        / _safe_path_component(str(rev or "default"))
+    )
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _local_model_ready(path: Path) -> bool:
+    """True if a downloaded HF snapshot looks present."""
+    if not path.is_dir():
+        return False
+    if (path / "config.json").is_file():
+        return True
+    # Some snapshots nest one level
+    for child in path.iterdir():
+        if child.is_dir() and (child / "config.json").is_file():
+            return True
+    return False
+
+
+def _resolve_local_model_root(path: Path) -> Path:
+    """Return directory that contains config.json."""
+    if (path / "config.json").is_file():
+        return path
+    if path.is_dir():
+        for child in path.iterdir():
+            if child.is_dir() and (child / "config.json").is_file():
+                return child
+    return path
+
+
+def download_hf_repo_to_local(
+    repo_id: str,
+    local_dir: Path,
+    *,
+    revision: Optional[str] = None,
+    force: bool = False,
+) -> Tuple[Path, str]:
+    """
+    Download a full HF repo snapshot into ``local_dir`` (like GGUF → models/).
+
+    Returns (path_with_config, status_message).
+    """
+    ensure_directories()
+    local_dir = Path(local_dir)
+    local_dir.mkdir(parents=True, exist_ok=True)
+
+    if _local_model_ready(local_dir) and not force:
+        root = _resolve_local_model_root(local_dir)
+        return root, f"local weights ready: {root}"
+
+    if not downloads_enabled():
+        if _local_model_ready(local_dir):
+            root = _resolve_local_model_root(local_dir)
+            return root, f"local weights ready (offline): {root}"
+        raise FileNotFoundError(
+            f"No local TS Pulse weights at {local_dir} and GT_NO_DOWNLOAD is set"
+        )
+
+    if not _can_import("huggingface_hub"):
+        ensure_python_packages([("huggingface_hub", "huggingface_hub")], repair=False)
+
+    from huggingface_hub import snapshot_download
+
+    logger.info(
+        "Downloading HF model into project models/: repo=%s rev=%s → %s",
+        repo_id,
+        revision or "default",
+        local_dir,
+    )
+    kwargs: Dict[str, Any] = {
+        "repo_id": repo_id,
+        "local_dir": str(local_dir),
+        # Avoid symlinks into user hub cache — keep a real copy under models/
+        "local_dir_use_symlinks": False,
+    }
+    # Newer hub uses max_workers; ignore if unsupported
+    try:
+        kwargs["local_dir_use_symlinks"] = False
+    except Exception:
+        pass
+    if revision:
+        kwargs["revision"] = revision
+
+    try:
+        snapshot_download(**kwargs)
+    except TypeError:
+        # Older huggingface_hub without local_dir_use_symlinks
+        kwargs.pop("local_dir_use_symlinks", None)
+        try:
+            snapshot_download(**kwargs)
+        except Exception as exc:
+            if revision:
+                kwargs.pop("revision", None)
+                logger.warning(
+                    "Snapshot with revision %s failed (%s); trying default revision",
+                    revision,
+                    exc,
+                )
+                snapshot_download(**kwargs)
+            else:
+                raise
+    except Exception as exc:
+        if revision:
+            logger.warning(
+                "Snapshot with revision %s failed (%s); trying default revision into %s",
+                revision,
+                exc,
+                local_dir,
+            )
+            kwargs.pop("revision", None)
+            try:
+                snapshot_download(**kwargs)
+            except TypeError:
+                kwargs.pop("local_dir_use_symlinks", None)
+                snapshot_download(**kwargs)
+        else:
+            raise
+
+    if not _local_model_ready(local_dir):
+        raise FileNotFoundError(
+            f"Download finished but config.json not found under {local_dir}"
+        )
+    root = _resolve_local_model_root(local_dir)
+    return root, f"downloaded to {root}"
 
 # Prebuilt CPU wheels for llama-cpp-python (Windows/Linux without local C++ toolchain)
 LLAMA_CPP_WHEEL_INDEX = "https://abetlen.github.io/llama-cpp-python/whl/cpu"
@@ -580,7 +757,7 @@ def ensure_tspulse(
     load_weights: bool = True,
 ) -> Tuple[Any, str, str]:
     """
-    Download / load Granite TS Pulse weights.
+    Download / load Granite TS Pulse weights into ``models/tspulse/`` (like GGUF).
 
     Returns (model_or_None, mode, status) where mode is 'tspulse' or 'statistical'.
     Cached after first successful load.
@@ -590,11 +767,16 @@ def ensure_tspulse(
     mid = model_id or os.environ.get("GT_TSPULSE_MODEL") or DEFAULT_TSPULSE_MODEL
     rev = revision or os.environ.get("GT_TSPULSE_REVISION") or DEFAULT_TSPULSE_REVISION
     cache_key = f"{mid}::{rev}"
+    local_dir = tspulse_local_dir(mid, rev)
 
     if load_weights and cache_key in _TSPULSE_CACHE:
-        return _TSPULSE_CACHE[cache_key], "tspulse", f"TS Pulse ready (cached): {mid}"
+        return (
+            _TSPULSE_CACHE[cache_key],
+            "tspulse",
+            f"TS Pulse ready (memory cache): {mid} @ {local_dir}",
+        )
 
-    # Fast path: do not pip-install or download snapshots during deferred startup
+    # Fast path: do not pip-install or download during deferred startup
     if not load_weights:
         loader, err = _tspulse_loader_class_with_error()
         if loader is None:
@@ -603,13 +785,17 @@ def ensure_tspulse(
                 "statistical",
                 f"TS Pulse deferred (loader not ready: {err})",
             )
-        return None, "statistical", f"TS Pulse package present for {mid} (load deferred)"
+        ready = "present" if _local_model_ready(local_dir) else "not downloaded yet"
+        return (
+            None,
+            "statistical",
+            f"TS Pulse package present for {mid}; local weights {ready} ({local_dir})",
+        )
 
     # Probe / install package, then resolve class with real error detail
     pkg_status = ensure_granite_tsfm()
     loader, load_err = _tspulse_loader_class_with_error()
     if loader is None:
-        # One more hard reset of import caches then retry
         _invalidate_import_caches()
         pkg_status = ensure_granite_tsfm()
         loader, load_err = _tspulse_loader_class_with_error()
@@ -621,23 +807,50 @@ def ensure_tspulse(
         _TSPULSE_LAST_ERROR = msg
         logger.warning("%s", msg)
         return None, "statistical", msg
-    # Success path clears sticky failure detail
     _TSPULSE_LAST_ERROR = None
 
-    if downloads_enabled():
+    # --- Download into models/tspulse/ (mirrors GGUF → models/) ---
+    local_root: Optional[Path] = None
+    dl_msg = ""
+    try:
+        local_root, dl_msg = download_hf_repo_to_local(mid, local_dir, revision=rev)
+        logger.info("TS Pulse local store: %s", dl_msg)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("TS Pulse local download failed (%s); trying default revision", exc)
         try:
-            _snapshot_repo(mid, rev)
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("TS Pulse snapshot optional fail: %s", exc)
+            # Fall back to default revision folder under same model id
+            fallback_dir = tspulse_local_dir(mid, "default")
+            local_root, dl_msg = download_hf_repo_to_local(
+                mid, fallback_dir, revision=None
+            )
+            logger.info("TS Pulse local store (default rev): %s", dl_msg)
+        except Exception as exc2:  # noqa: BLE001
+            last_err = exc2
+            # Last resort: load from hub id into memory but still prefer local if partial
+            if _local_model_ready(local_dir):
+                local_root = _resolve_local_model_root(local_dir)
+            else:
+                logger.warning(
+                    "TS Pulse unavailable under models/tspulse (%s); statistical fallback",
+                    last_err,
+                )
+                _TSPULSE_LAST_ERROR = str(last_err)
+                return (
+                    None,
+                    "statistical",
+                    f"TS Pulse download/load failed ({last_err}); using statistical detector",
+                )
 
     last_err: Optional[Exception] = None
-    # Prefer default revision first (anomaly-specific rev often missing)
-    for kwargs in ({}, {"revision": rev} if rev else {}):
+    load_targets: List[Any] = []
+    if local_root is not None:
+        load_targets.append(str(local_root))
+    # Prefer explicit local path only (no silent hub cache for primary path)
+    for source in load_targets:
         try:
-            logger.info("Loading TS Pulse %s %s …", mid, kwargs or "(default)")
-            model = loader.from_pretrained(mid, **kwargs)
+            logger.info("Loading TS Pulse from local models/ path: %s", source)
+            model = loader.from_pretrained(source, local_files_only=True)
             model.eval()
-            # Prefer CUDA when available
             try:
                 from .device import device_status_summary, move_module_to_device, torch_device
 
@@ -652,11 +865,44 @@ def ensure_tspulse(
             return (
                 model,
                 "tspulse",
-                f"TS Pulse ready: {mid} {kwargs or '(default rev)'}{dev_note}",
+                f"TS Pulse ready: {mid} from {source}{dev_note}",
             )
         except Exception as exc:  # noqa: BLE001
             last_err = exc
-            logger.warning("TS Pulse load attempt failed: %s", exc)
+            logger.warning("TS Pulse local load failed: %s", exc)
+
+    # Optional network load only if downloads allowed and local failed
+    if downloads_enabled():
+        for kwargs in ({}, {"revision": rev} if rev else {}):
+            try:
+                logger.warning(
+                    "Falling back to HF hub load for TS Pulse %s %s "
+                    "(will re-save under models/tspulse on next successful snapshot)",
+                    mid,
+                    kwargs or "(default)",
+                )
+                model = loader.from_pretrained(mid, **kwargs)
+                model.eval()
+                try:
+                    from .device import move_module_to_device, torch_device
+
+                    model = move_module_to_device(model, torch_device())
+                except Exception:
+                    pass
+                # Best-effort: persist snapshot for next time
+                try:
+                    download_hf_repo_to_local(mid, local_dir, revision=kwargs.get("revision"))
+                except Exception:
+                    pass
+                _TSPULSE_CACHE[cache_key] = model
+                return (
+                    model,
+                    "tspulse",
+                    f"TS Pulse ready via hub fallback: {mid} {kwargs or '(default)'}",
+                )
+            except Exception as exc:  # noqa: BLE001
+                last_err = exc
+                logger.warning("TS Pulse hub fallback failed: %s", exc)
 
     return (
         None,
@@ -700,28 +946,13 @@ def _tspulse_loader_class_with_error() -> Tuple[Any, str]:
 
 
 def _snapshot_repo(repo_id: str, revision: Optional[str] = None) -> str:
-    """Download a full HF model snapshot into the hub cache."""
-    if not downloads_enabled():
-        return "skipped"
-    if not _can_import("huggingface_hub"):
-        ensure_python_packages([("huggingface_hub", "huggingface_hub")], repair=False)
+    """Download a full HF model snapshot into ``models/tspulse/`` (project local)."""
     try:
-        from huggingface_hub import snapshot_download
-
-        kwargs: Dict[str, Any] = {"repo_id": repo_id}
-        if revision:
-            kwargs["revision"] = revision
-        path = snapshot_download(**kwargs)
-        return f"cached at {path}"
+        local = tspulse_local_dir(repo_id, revision)
+        root, msg = download_hf_repo_to_local(repo_id, local, revision=revision)
+        return msg
     except Exception as exc:  # noqa: BLE001
-        if revision:
-            try:
-                from huggingface_hub import snapshot_download
-
-                path = snapshot_download(repo_id=repo_id)
-                return f"cached at {path} (default rev; wanted {revision})"
-            except Exception as exc2:  # noqa: BLE001
-                return f"failed: {exc2}"
+        return f"failed: {exc}"
         return f"failed: {exc}"
 
 

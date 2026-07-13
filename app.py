@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-GT Diagnostic Harness — terminal UI entry point.
+GT Diagnostic Harness — entry point.
 
 Launch
 ------
     cd gt_harness
     pip install -r requirements.txt
     python app.py                      # Textual TUI (default)
-    python app.py --ui ratatui         # Rust ratatui TUI (swap)
-    set GT_UI=ratatui && python app.py # same via env
+    python app.py --ui gui             # Modern desktop GUI
+    set GT_UI=gui && python app.py
 
 Optional:
     python app.py --no-download
     python app.py --download-only
     python app.py --cli-once samples/gt_sensors_demo.csv
-    python app.py --json-once samples/gt_sensors_demo.csv   # bridge for ratatui
+    python app.py --json-once samples/gt_sensors_demo.csv
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ if str(ROOT) not in sys.path:
 
 from src.analysis import get_rag, run_diagnosis, score_severity  # noqa: E402
 from src.bridge import run_json_once  # noqa: E402
-from src.models import get_bundle, is_offline_draft, load_models, llm_available  # noqa: E402
+from src.models import is_offline_draft, load_models, llm_available  # noqa: E402
 from src.tools import cases_history_markdown, save_case  # noqa: E402
 from src.ui_launch import VALID_UIS, launch_ui, resolve_ui  # noqa: E402
 from src.utils import ensure_directories, setup_logging  # noqa: E402
@@ -117,14 +117,14 @@ def run_cli_once(
 
 def main(argv: Optional[list] = None) -> int:
     parser = argparse.ArgumentParser(
-        description="GT Diagnostic Harness — Textual or ratatui TUI"
+        description="GT Diagnostic Harness — Textual TUI or modern desktop GUI"
     )
     parser.add_argument(
         "--ui",
         choices=list(VALID_UIS),
         default=None,
-        help="TUI backend: textual (Python, default) or ratatui (Rust). "
-        "Also set via GT_UI=textual|ratatui",
+        help="UI backend: textual (terminal, default) or gui (desktop). "
+        "Also set via GT_UI=textual|gui",
     )
     parser.add_argument(
         "--no-download",
@@ -139,12 +139,12 @@ def main(argv: Optional[list] = None) -> int:
     parser.add_argument(
         "--cli-once",
         metavar="CSV",
-        help="Run one non-interactive diagnosis on CSV and exit (no TUI)",
+        help="Run one non-interactive diagnosis on CSV and exit (no UI)",
     )
     parser.add_argument(
         "--json-once",
         metavar="CSV",
-        help="JSON diagnosis bridge for ratatui / external frontends (stdout = one JSON object)",
+        help="JSON diagnosis bridge (stdout = one JSON object)",
     )
     parser.add_argument(
         "--mode",

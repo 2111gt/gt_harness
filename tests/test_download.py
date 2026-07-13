@@ -12,9 +12,17 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.download import downloads_enabled, ensure_all_models, ensure_gguf
+from src.download import (
+    downloads_enabled,
+    ensure_all_models,
+    ensure_gguf,
+    tspulse_clf_local_dir,
+    tspulse_local_dir,
+    _local_model_ready,
+    _safe_path_component,
+)
 from src.models import load_models
-from src.utils import MODELS_DIR, find_gguf_model
+from src.utils import MODELS_DIR, TSPULSE_MODELS_DIR, find_gguf_model
 
 
 class TestDownloadFlags(unittest.TestCase):
@@ -67,6 +75,43 @@ class TestDownloadFlags(unittest.TestCase):
         finally:
             if fake.exists():
                 fake.unlink()
+
+    def test_tspulse_local_dir_under_models(self):
+        p = tspulse_local_dir(
+            "ibm-granite/granite-timeseries-tspulse-r1",
+            "tspulse-block-ad",
+        )
+        self.assertTrue(str(p).replace("\\", "/").endswith(
+            "models/tspulse/ibm-granite--granite-timeseries-tspulse-r1/tspulse-block-ad"
+        ) or (
+            p.is_relative_to(TSPULSE_MODELS_DIR)
+            if hasattr(p, "is_relative_to")
+            else str(TSPULSE_MODELS_DIR) in str(p)
+        ))
+        self.assertTrue(p.is_dir())
+        self.assertIn("tspulse", p.parts)
+        self.assertNotIn(".cache", p.parts)
+
+    def test_tspulse_clf_local_dir_under_models(self):
+        p = tspulse_clf_local_dir("ibm-granite/granite-timeseries-tspulse-r1", "dual")
+        self.assertIn("tspulse_clf", p.parts)
+        self.assertTrue(p.is_dir())
+
+    def test_safe_path_and_ready_helper(self):
+        self.assertEqual(
+            _safe_path_component("ibm-granite/foo"),
+            "ibm-granite--foo",
+        )
+        empty = MODELS_DIR / "_empty_tspulse_test"
+        empty.mkdir(parents=True, exist_ok=True)
+        try:
+            self.assertFalse(_local_model_ready(empty))
+            (empty / "config.json").write_text("{}", encoding="utf-8")
+            self.assertTrue(_local_model_ready(empty))
+        finally:
+            for child in empty.iterdir():
+                child.unlink()
+            empty.rmdir()
 
 
 if __name__ == "__main__":

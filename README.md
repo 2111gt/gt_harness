@@ -4,7 +4,7 @@ Fully **local** gas turbine (GT) diagnostic application:
 
 | Layer | Technology |
 |-------|------------|
-| UI | **Modern Textual TUI** — command strip, status chips, sample picker, proof plots, live pipeline, progress + ETA |
+| UI | **Textual TUI** (default) or **desktop GUI** (`--ui gui`) — sample picker, proof plots, live log, progress |
 | Anomaly detection | Granite **TS Pulse** (anomaly revision) + statistical fallback |
 | Main LLM | **Granite 4.1 8B** GGUF via llama-cpp-python or official **llama-cli** (CPU) |
 | RAG | **ChromaDB** + **SentenceTransformer** (`all-MiniLM-L6-v2`) |
@@ -48,18 +48,23 @@ pip install -r requirements.txt
 python app.py
 ```
 
-This opens a **terminal UI** in your console — not a browser.
+Default is a **terminal UI (Textual)** in your console. A **modern desktop GUI** is also available.
 
-### Swap TUI backends (Textual ↔ ratatui)
+### UI backends (Textual TUI ↔ desktop GUI)
 
-Same diagnosis engine; two interchangeable frontends:
+Same diagnosis engine; two frontends:
 
 | Backend | Launch | Notes |
 |---------|--------|--------|
-| **Textual** (default) | `python app.py` or `python app.py --ui textual` | Pure Python |
-| **ratatui** (Rust) | `python app.py --ui ratatui` or `$env:GT_UI='ratatui'; python app.py` | Build once: `cd tui_ratatui && cargo build --release` |
+| **Textual** (default) | `python app.py` or `python app.py --ui textual` | Terminal TUI |
+| **GUI** | `python app.py --ui gui` or `$env:GT_UI='gui'; python app.py` | CustomTkinter window |
 
-The ratatui UI calls `python app.py --json-once …` under the hood (see `src/bridge.py`, `tui_ratatui/README.md`).
+```powershell
+pip install customtkinter   # required for --ui gui
+python app.py --ui gui
+```
+
+**Textual keys:**
 
 | Key | Action |
 |-----|--------|
@@ -73,7 +78,11 @@ While loading models or running a diagnosis, the **bottom status panel** shows:
 - progress bar (% complete)
 - current step text, elapsed time, and estimated time remaining
 
-After a run, the right pane shows **proof plots**: ASCII charts of the channels the anomaly engine ranked highest, with **▲** on flagged samples — visual evidence next to the written diagnosis. The same plots are embedded in the markdown report and written to `logs/last_evidence_plots.txt`.
+After a run, **proof plots** show the channels the anomaly engine ranked highest (flagged samples marked):
+
+- **Desktop GUI** (`--ui gui`): high-quality **matplotlib PNGs** in the Proof plots tab (`logs/evidence_plots/`)
+- **Textual TUI**: braille/ASCII charts in the report pane; PNGs still written to disk
+- Markdown report + `logs/last_evidence_plots.txt` include ASCII; report lists PNG paths when available
 
 Optional flags:
 
@@ -154,6 +163,7 @@ On a laptop with an **NVIDIA RTX**, install a **CUDA** build of PyTorch and idea
 | `GT_LLAMA_CPP_ZIP_URL` | Override llama.cpp binary zip (e.g. CUDA build URL) |
 | `GT_TSPULSE_MODEL` | HF model id override |
 | `GT_TSPULSE_REVISION` | HF revision (anomaly detection) |
+| `GT_TSPULSE_LOCAL_DIR` | Override folder for TS Pulse weights (default `models/tspulse/...`) |
 | `GT_FULL_REFLECTION` | Default: second LLM self-review when GGUF is loaded. Set `0` to skip (faster). |
 | `GT_TSPULSE_CLF_ENABLE` | `1` (default) load classification head; `0` disable |
 | `GT_TSPULSE_CLF_PATH` | Fine-tuned classifier checkpoint dir (after training) |
