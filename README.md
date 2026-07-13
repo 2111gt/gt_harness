@@ -173,6 +173,13 @@ On a laptop with an **NVIDIA RTX**, install a **CUDA** build of PyTorch and idea
 | `GT_LLAMA_SMOKE` | `1` = smoke-test GGUF on bind (slower startup) |
 | `GT_NO_DOWNLOAD` | `1` = offline; no pip/HF downloads |
 
+
+## Documentation
+
+Project wiki-style docs live in [docs/](docs/Home.md) (Getting Started, UIs, models, plots, env vars, architecture, troubleshooting).
+
+Published wiki (when available): https://github.com/2111gt/gt_harness/wiki
+
 ## License
 
 MIT — sample knowledge is educational, not OEM documentation.
