@@ -1,11 +1,10 @@
-"""Tests for interchangeable TUI backends + JSON bridge."""
+"""Tests for UI backends (textual / gui) + JSON bridge."""
 
 from __future__ import annotations
 
 import json
 import os
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 
@@ -16,16 +15,10 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from src.analysis import run_diagnosis
 from src.bridge import result_to_bridge_dict, run_json_once
 from src.models import ModelBundle
-from src.analysis import run_diagnosis
-from src.ui_launch import (
-    VALID_UIS,
-    find_ratatui_binary,
-    launch_ui,
-    resolve_ui,
-    ratatui_binary_candidates,
-)
+from src.ui_launch import VALID_UIS, resolve_ui
 
 
 class TestResolveUi(unittest.TestCase):
@@ -34,10 +27,12 @@ class TestResolveUi(unittest.TestCase):
         try:
             self.assertEqual(resolve_ui(None), "textual")
             self.assertEqual(resolve_ui("textual"), "textual")
-            self.assertEqual(resolve_ui("ratatui"), "ratatui")
-            self.assertEqual(resolve_ui("rust"), "ratatui")
-            os.environ["GT_UI"] = "ratatui"
-            self.assertEqual(resolve_ui(None), "ratatui")
+            self.assertEqual(resolve_ui("gui"), "gui")
+            self.assertEqual(resolve_ui("desktop"), "gui")
+            # Legacy ratatui alias maps to gui
+            self.assertEqual(resolve_ui("ratatui"), "gui")
+            os.environ["GT_UI"] = "gui"
+            self.assertEqual(resolve_ui(None), "gui")
             with self.assertRaises(ValueError):
                 resolve_ui("swing")
         finally:
@@ -48,20 +43,16 @@ class TestResolveUi(unittest.TestCase):
 
     def test_valid_uis(self):
         self.assertIn("textual", VALID_UIS)
-        self.assertIn("ratatui", VALID_UIS)
+        self.assertIn("gui", VALID_UIS)
+        self.assertNotIn("ratatui", VALID_UIS)
 
-    def test_ratatui_crate_present(self):
-        crate = ROOT / "tui_ratatui"
-        self.assertTrue((crate / "Cargo.toml").is_file())
-        self.assertTrue((crate / "src" / "main.rs").is_file())
-        cargo = (crate / "Cargo.toml").read_text(encoding="utf-8")
-        self.assertIn("ratatui", cargo)
-        main = (crate / "src" / "main.rs").read_text(encoding="utf-8")
-        self.assertIn("json-once", main)
-        self.assertIn("evidence_ascii", main)
-
-    def test_candidates_nonempty(self):
-        self.assertGreater(len(ratatui_binary_candidates()), 0)
+    def test_ratatui_removed(self):
+        self.assertFalse((ROOT / "tui_ratatui").exists())
+        self.assertTrue((ROOT / "src" / "gui_app.py").is_file())
+        gui_src = (ROOT / "src" / "gui_app.py").read_text(encoding="utf-8")
+        self.assertIn("run_gui", gui_src)
+        self.assertIn("GTHarnessGUI", gui_src)
+        self.assertIn("customtkinter", gui_src.lower() + "customtkinter")
 
 
 class TestBridge(unittest.TestCase):
@@ -93,7 +84,6 @@ class TestBridge(unittest.TestCase):
         self.assertTrue(payload["evidence_ascii"] or payload["proof_channels"])
         self.assertIn("display_markdown", payload)
         self.assertIn("severity", payload)
-        # JSON serializable
         raw = json.dumps(payload)
         self.assertIn("schema_version", raw)
 
@@ -110,7 +100,8 @@ class TestAppEntryUiFlag(unittest.TestCase):
     def test_app_py_exposes_ui_and_json_once(self):
         src = (ROOT / "app.py").read_text(encoding="utf-8")
         self.assertIn("--ui", src)
-        self.assertIn("ratatui", src)
+        self.assertIn("gui", src)
+        self.assertNotIn("ratatui", src)
         self.assertIn("--json-once", src)
         self.assertIn("launch_ui", src)
 

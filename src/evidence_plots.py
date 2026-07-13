@@ -16,7 +16,9 @@ spikes stay sharp on long historian CSVs.
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -49,6 +51,133 @@ _DEFAULT_HEIGHT = 16
 _DEFAULT_MAX_POINTS = 240
 _DEFAULT_MAX_CHANNELS = 4
 
+# Tag → common-language name (GT historian style)
+_CHANNEL_COMMON_NAMES: Dict[str, str] = {
+    "timestamp": "Time stamp",
+    "load_MW": "Generator / turbine load",
+    "CDP_bar": "Compressor discharge pressure",
+    "CDT_C": "Compressor discharge temperature",
+    "EGT_avg_C": "Exhaust gas temperature (average)",
+    "EGT_spread_C": "Exhaust gas temperature spread",
+    "EGT_Z1_C": "Exhaust gas temperature — zone 1",
+    "EGT_Z2_C": "Exhaust gas temperature — zone 2",
+    "EGT_Z3_C": "Exhaust gas temperature — zone 3",
+    "EGT_Z4_C": "Exhaust gas temperature — zone 4",
+    "fuel_flow_kg_s": "Fuel flow rate",
+    "IGV_deg": "Inlet guide vane angle",
+    "vib_DE_mm_s": "Bearing vibration — drive end",
+    "vib_NDE_mm_s": "Bearing vibration — non-drive end",
+    "lube_oil_C": "Lube oil temperature",
+    "comb_dyn_psi": "Combustion dynamics / pulsation",
+    "trip_active": "Trip active flag",
+}
+
+# Pattern heuristics when exact tag not in map
+_UNIT_SUFFIXES: Tuple[Tuple[str, str, str], ...] = (
+    ("_MW", "MW", "power / load"),
+    ("_bar", "bar", "pressure"),
+    ("_psi", "psi", "pressure / dynamics"),
+    ("_mm_s", "mm/s", "vibration velocity"),
+    ("_kg_s", "kg/s", "mass flow"),
+    ("_deg", "deg", "angle / position"),
+    ("_C", "°C", "temperature"),
+    ("_F", "°F", "temperature"),
+)
+
+
+def channel_common_name(tag: str) -> str:
+    """Human-readable name for a sensor tag."""
+    key = str(tag or "").strip()
+    if not key:
+        return "Unknown channel"
+    if key in _CHANNEL_COMMON_NAMES:
+        return _CHANNEL_COMMON_NAMES[key]
+    # TC1..TC27 exhaust thermocouples
+    m = re.match(r"^TC(\d+)$", key, re.I)
+    if m:
+        return f"Exhaust thermocouple TC{int(m.group(1))}"
+    # Generic EGT zone
+    m = re.match(r"^EGT[_-]?Z(\d+)", key, re.I)
+    if m:
+        return f"Exhaust gas temperature — zone {m.group(1)}"
+    low = key.lower()
+    if "spread" in low and ("egt" in low or "exhaust" in low):
+        return "Exhaust gas temperature spread"
+    if "vib" in low and ("de" in low or "drive" in low):
+        return "Bearing vibration — drive end"
+    if "vib" in low and ("nde" in low or "non" in low):
+        return "Bearing vibration — non-drive end"
+    if "fuel" in low:
+        return "Fuel flow"
+    if "load" in low:
+        return "Unit load"
+    if "igv" in low:
+        return "Inlet guide vane angle"
+    if "lube" in low or "oil" in low:
+        return "Lube oil temperature"
+    if "comb" in low and "dyn" in low:
+        return "Combustion dynamics"
+    # Title-case fallback: load_MW → Load MW
+    pretty = key.replace("_", " ").replace("-", " ").strip()
+    return pretty[:1].upper() + pretty[1:] if pretty else key
+
+
+def channel_unit(tag: str) -> str:
+    """Engineering unit string inferred from tag suffix."""
+    key = str(tag or "")
+    for suffix, unit, _hint in _UNIT_SUFFIXES:
+        if key.endswith(suffix):
+            return unit
+    if re.match(r"^TC\d+$", key, re.I):
+        return "°C"
+    if "temp" in key.lower() or key.upper().endswith("C"):
+        return "°C"
+    if "vib" in key.lower():
+        return "mm/s"
+    return ""
+
+
+def channel_display_title(tag: str, *, score: Optional[float] = None, extra: str = "") -> str:
+    """
+    Plot title: tag + common language name (+ optional score/extra).
+
+    Example: ``EGT_spread_C — Exhaust gas temperature spread · score=12.3``
+    """
+    common = channel_common_name(tag)
+    if common.lower() == str(tag).lower():
+        title = str(tag)
+    else:
+        title = f"{tag}  —  {common}"
+    bits = [title]
+    if score is not None:
+        try:
+            bits.append(f"score={float(score):.3f}")
+        except (TypeError, ValueError):
+            bits.append(f"score={score}")
+    if extra:
+        bits.append(extra)
+    return "  ·  ".join(bits)
+
+
+def channel_ylabel(tag: str) -> str:
+    """Y-axis label with tag, common name, and unit."""
+    common = channel_common_name(tag)
+    unit = channel_unit(tag)
+    if common.lower() != str(tag).lower():
+        base = f"Y: {tag}  ({common})"
+    else:
+        base = f"Y: {tag}"
+    if unit:
+        return f"{base}  [{unit}]"
+    return base
+
+
+def channel_xlabel(*, window_start: int = 0, window_end: int = 0) -> str:
+    """X-axis label with sample index range."""
+    if window_end > window_start:
+        return f"X: Sample index  (rows {window_start}–{window_end - 1})"
+    return "X: Sample index"
+
 
 @dataclass
 class ChannelEvidence:
@@ -64,6 +193,9 @@ class ChannelEvidence:
     window_start: int = 0
     window_end: int = 0
     full_n: int = 0
+    # Higher-resolution series for GUI / PNG (event window, lightly capped)
+    hires_values: List[float] = field(default_factory=list)
+    hires_flag_rows: List[int] = field(default_factory=list)
 
     @property
     def n(self) -> int:
@@ -78,6 +210,9 @@ class EvidenceBundle:
     ascii_art: str = ""
     title: str = "Proof plots — channels implicated by the anomaly engine"
     note: str = ""
+    # High-quality matplotlib PNGs (for desktop GUI / reports)
+    image_paths: List[str] = field(default_factory=list)
+    combined_image_path: str = ""
 
     def is_empty(self) -> bool:
         return not self.channels
@@ -169,6 +304,10 @@ def build_evidence_bundle(
 
         # Zoom onto the event window so spikes stay high-resolution
         win_vals, win_flags, w0, w1 = _extract_event_window(values, flag_rows)
+        # Hi-res for GUI matplotlib (cap very long windows for smooth draw)
+        hires_vals, hires_flags = _downsample_with_flags(
+            win_vals, win_flags, max_points=max(max_points, 2000)
+        )
         vals_ds, flags_ds = _downsample_with_flags(
             win_vals, win_flags, max_points=max_points
         )
@@ -184,6 +323,8 @@ def build_evidence_bundle(
                 window_start=w0,
                 window_end=w1,
                 full_n=len(values),
+                hires_values=hires_vals.tolist(),
+                hires_flag_rows=hires_flags,
             )
         )
 
@@ -210,34 +351,286 @@ def build_evidence_bundle(
     header = (
         f"{title}\n"
         f"Engine: {engine} · ranked by anomaly score · "
-        f"{_FLAG} = flagged sample · braille hi-res · auto-zoom on event\n"
+        f"{_FLAG} = flagged sample · braille (TUI) + PNG (GUI) · auto-zoom on event\n"
     )
     full = header + "\n" + art
     note = (
         f"Showing {len(channels)} channel(s) the detector ranked highest as "
-        "high-resolution visual proof (zoomed to anomaly window when flags exist)."
+        "visual proof (zoomed to anomaly window when flags exist). "
+        "Desktop GUI shows high-quality PNG charts; TUI uses braille ASCII."
     )
+
+    image_paths: List[str] = []
+    combined = ""
+    try:
+        image_paths, combined = render_evidence_pngs(channels, engine=engine)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Matplotlib PNG proof plots failed: %s", exc)
+
     return EvidenceBundle(
         channels=channels,
         ascii_art=full.strip() + "\n",
         title=title,
         note=note,
+        image_paths=image_paths,
+        combined_image_path=combined or "",
     )
 
 
 def evidence_to_markdown(bundle: EvidenceBundle) -> str:
-    """Markdown section embedding fenced monospaced plots."""
+    """Markdown section embedding fenced monospaced plots (+ PNG paths if any)."""
     if bundle.is_empty() and not (bundle.ascii_art or "").strip():
         return (
             "## Proof plots (sensor evidence)\n\n"
             "_No channels selected for plotting._\n"
         )
     body = bundle.ascii_art or "_n/a_"
+    img_bits = ""
+    paths = list(bundle.image_paths or [])
+    if bundle.combined_image_path:
+        paths = [bundle.combined_image_path] + [
+            p for p in paths if p != bundle.combined_image_path
+        ]
+    if paths:
+        img_bits = "\n\n### High-quality chart files\n" + "\n".join(
+            f"- `{p}`" for p in paths[:8]
+        )
     return (
         f"## Proof plots (sensor evidence)\n\n"
         f"{bundle.note}\n\n"
         f"```text\n{body.rstrip()}\n```\n"
+        f"{img_bits}\n"
     )
+
+
+def render_evidence_pngs(
+    channels: Sequence[ChannelEvidence],
+    *,
+    engine: str = "n/a",
+    out_dir: Optional[Path] = None,
+    dpi: int = 160,
+) -> Tuple[List[str], str]:
+    """
+    Render high-quality PNG charts for GUI / reports.
+
+    Returns (list of per-channel PNG paths, combined multi-panel PNG path or "").
+    Uses matplotlib when available; otherwise returns empty lists.
+    """
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        from matplotlib.ticker import MaxNLocator
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("matplotlib unavailable for PNG plots: %s", exc)
+        return [], ""
+
+    from .utils import PROJECT_ROOT, ensure_directories
+
+    ensure_directories()
+    if out_dir is None:
+        out_dir = PROJECT_ROOT / "logs" / "evidence_plots"
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Clear previous run artifacts in this folder (keep dir)
+    for old in out_dir.glob("proof_*.png"):
+        try:
+            old.unlink()
+        except Exception:
+            pass
+
+    # Dark industrial theme
+    bg = "#0f1419"
+    panel = "#1a2332"
+    grid_c = "#334155"
+    text_c = "#e2e8f0"
+    muted = "#94a3b8"
+    line_c = "#22d3ee"
+    fill_c = "#0891b2"
+    flag_c = "#f59e0b"
+    accent = "#f97316"
+
+    paths: List[str] = []
+    n_ch = len(channels)
+    if n_ch == 0:
+        return [], ""
+
+    # Combined figure
+    fig_h = max(3.2 * n_ch, 4.0)
+    fig, axes = plt.subplots(
+        n_ch,
+        1,
+        figsize=(11.5, fig_h),
+        dpi=dpi,
+        squeeze=False,
+        facecolor=bg,
+    )
+    axes_flat = axes.ravel()
+
+    for i, ch in enumerate(channels):
+        y = np.asarray(
+            ch.hires_values if ch.hires_values else ch.values,
+            dtype=float,
+        )
+        flags = list(ch.hires_flag_rows if ch.hires_values else ch.flag_rows)
+        n = len(y)
+        if n == 0:
+            continue
+        # Map window sample index for x-axis
+        if ch.window_end > ch.window_start and n > 1:
+            x = np.linspace(ch.window_start, ch.window_end - 1, n)
+        else:
+            x = np.arange(n, dtype=float)
+
+        ax = axes_flat[i]
+        ax.set_facecolor(panel)
+        finite = np.isfinite(y)
+        if not np.any(finite):
+            continue
+        display = channel_display_title(ch.name, score=ch.score, extra=ch.reason or "")
+        ylabel = channel_ylabel(ch.name)
+        xlabel = channel_xlabel(window_start=ch.window_start, window_end=ch.window_end)
+        common = channel_common_name(ch.name)
+
+        ax.plot(
+            x[finite],
+            y[finite],
+            color=line_c,
+            linewidth=1.8,
+            solid_capstyle="round",
+            zorder=3,
+            label=f"{ch.name} ({common})" if common.lower() != ch.name.lower() else ch.name,
+        )
+        ax.fill_between(
+            x[finite],
+            y[finite],
+            np.nanmin(y[finite]),
+            color=fill_c,
+            alpha=0.22,
+            zorder=2,
+        )
+        # Flag markers
+        fx, fy = [], []
+        for fr in flags:
+            if 0 <= fr < n and np.isfinite(y[fr]):
+                fx.append(x[fr])
+                fy.append(y[fr])
+        if fx:
+            ax.scatter(
+                fx,
+                fy,
+                s=48,
+                c=flag_c,
+                marker="^",
+                zorder=5,
+                edgecolors="#0f172a",
+                linewidths=0.6,
+                label="flagged sample",
+            )
+            for xv in fx[:24]:
+                ax.axvline(xv, color=accent, alpha=0.18, linewidth=0.8, zorder=1)
+
+        ax.set_title(display, color=text_c, fontsize=10, loc="left", pad=8)
+        # Always label both axes with indices / engineering units
+        ax.set_ylabel(ylabel, color=muted, fontsize=9)
+        ax.set_xlabel(xlabel, color=muted, fontsize=9)
+        ax.tick_params(colors=muted, labelsize=8, which="both")
+        ax.tick_params(axis="x", labelbottom=True)
+        ax.tick_params(axis="y", labelleft=True)
+        for spine in ax.spines.values():
+            spine.set_color(grid_c)
+        ax.grid(True, color=grid_c, alpha=0.45, linewidth=0.6)
+        ax.xaxis.set_major_locator(MaxNLocator(nbins=8, integer=True))
+        ax.yaxis.set_major_locator(MaxNLocator(nbins=6))
+        ax.legend(
+            loc="upper right",
+            fontsize=8,
+            facecolor=panel,
+            edgecolor=grid_c,
+            labelcolor=text_c,
+        )
+
+        # Per-channel PNG
+        fig_one, ax1 = plt.subplots(figsize=(11.0, 3.6), dpi=dpi, facecolor=bg)
+        ax1.set_facecolor(panel)
+        ax1.plot(
+            x[finite],
+            y[finite],
+            color=line_c,
+            linewidth=2.0,
+            zorder=3,
+            label=f"{ch.name} ({common})" if common.lower() != ch.name.lower() else ch.name,
+        )
+        ax1.fill_between(
+            x[finite],
+            y[finite],
+            np.nanmin(y[finite]),
+            color=fill_c,
+            alpha=0.25,
+            zorder=2,
+        )
+        if fx:
+            ax1.scatter(
+                fx,
+                fy,
+                s=56,
+                c=flag_c,
+                marker="^",
+                zorder=5,
+                edgecolors="#0f172a",
+                linewidths=0.7,
+                label="flagged sample",
+            )
+            for xv in fx[:24]:
+                ax1.axvline(xv, color=accent, alpha=0.2, linewidth=0.9, zorder=1)
+        ax1.set_title(
+            channel_display_title(ch.name, score=ch.score, extra=f"engine={engine}"),
+            color=text_c,
+            fontsize=11,
+            loc="left",
+        )
+        ax1.set_xlabel(xlabel, color=muted, fontsize=9)
+        ax1.set_ylabel(ylabel, color=muted, fontsize=9)
+        ax1.tick_params(colors=muted, labelsize=8, which="both")
+        ax1.tick_params(axis="x", labelbottom=True)
+        ax1.tick_params(axis="y", labelleft=True)
+        for spine in ax1.spines.values():
+            spine.set_color(grid_c)
+        ax1.grid(True, color=grid_c, alpha=0.45, linewidth=0.6)
+        ax1.xaxis.set_major_locator(MaxNLocator(nbins=10, integer=True))
+        ax1.yaxis.set_major_locator(MaxNLocator(nbins=7))
+        ax1.legend(
+            loc="upper right",
+            fontsize=8,
+            facecolor=panel,
+            edgecolor=grid_c,
+            labelcolor=text_c,
+        )
+        safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in ch.name)[:48]
+        one_path = out_dir / f"proof_{i+1:02d}_{safe}.png"
+        fig_one.tight_layout()
+        fig_one.savefig(one_path, facecolor=bg, edgecolor="none", bbox_inches="tight")
+        plt.close(fig_one)
+        paths.append(str(one_path.resolve()))
+
+    fig.suptitle(
+        f"Proof plots — anomaly engine: {engine}  ·  ▲ flagged samples",
+        color=text_c,
+        fontsize=12,
+        fontweight="bold",
+        y=1.002,
+    )
+    fig.tight_layout()
+    combined = out_dir / "proof_combined.png"
+    fig.savefig(combined, facecolor=bg, edgecolor="none", bbox_inches="tight")
+    plt.close(fig)
+    combined_s = str(combined.resolve())
+    # Put combined first for GUI
+    ordered = [combined_s] + [p for p in paths if p != combined_s]
+    logger.info("Wrote %d high-quality proof plot PNG(s) under %s", len(ordered), out_dir)
+    return ordered, combined_s
 
 
 def _reason_for_channel(
@@ -487,10 +880,15 @@ def _plot_one_braille(
 
     # ── Assemble text frame ──────────────────────────────────────────
     lines: List[str] = []
-    title = f"┏ {ch.name}"
+    common = channel_common_name(ch.name)
+    if common.lower() != ch.name.lower():
+        title = f"┏ {ch.name}  —  {common}"
+    else:
+        title = f"┏ {ch.name}"
     meta = f"  {ch.reason}"
     if ch.full_n and (ch.window_end - ch.window_start) < ch.full_n:
         meta += f"  ·  window rows {ch.window_start}–{ch.window_end - 1} of {ch.full_n}"
+    meta += f"  ·  X=sample index  Y={channel_unit(ch.name) or 'value'}"
     header = title + meta
     # Don't truncate mid-name; wrap meta if needed
     if len(header) > max(width, 80):

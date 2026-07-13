@@ -392,8 +392,8 @@ def _load_tspulse(auto_download: bool = True) -> Tuple[Any, str, str]:
     """
     Load Granite TS Pulse for anomaly detection.
 
-    Always prefers ``download.ensure_tspulse`` (correct class path + HF cache).
-    Falls back to a direct import path if the helper raises.
+    Always prefers ``download.ensure_tspulse`` (weights under models/tspulse/).
+    Falls back to a direct local load if the helper raises.
     """
     # Primary path — shared with download / tests (finds TSPulseForReconstruction)
     try:
@@ -402,7 +402,7 @@ def _load_tspulse(auto_download: bool = True) -> Tuple[Any, str, str]:
         if auto_download:
             return ensure_tspulse(load_weights=True)
 
-        # Offline: only load if package already importable
+        # Offline: only load if package already importable + local weights present
         loader = _tspulse_loader_class()
         if loader is None:
             return (
@@ -416,48 +416,51 @@ def _load_tspulse(auto_download: bool = True) -> Tuple[Any, str, str]:
 
     import os
 
+    from .download import (
+        download_hf_repo_to_local,
+        tspulse_local_dir,
+        _local_model_ready,
+        _resolve_local_model_root,
+        _tspulse_loader_class,
+    )
+
     model_id = os.environ.get("GT_TSPULSE_MODEL", TSPULSE_MODEL_ID)
     revision = os.environ.get("GT_TSPULSE_REVISION", TSPULSE_REVISION)
-
-    loader = None
-    last_import_err: Optional[str] = None
-    for mod_name, cls_name in (
-        ("tsfm_public.models.tspulse", "TSPulseForReconstruction"),
-        ("tsfm_public.models.tspulse.modeling_tspulse", "TSPulseForReconstruction"),
-        ("tsfm_public.models.tinytimemixer", "TinyTimeMixerForPrediction"),
-    ):
-        try:
-            mod = __import__(mod_name, fromlist=[cls_name])
-            loader = getattr(mod, cls_name, None)
-            if loader is not None:
-                break
-        except Exception as exc:  # noqa: BLE001
-            last_import_err = f"{mod_name}: {exc}"
-            continue
-
+    loader = _tspulse_loader_class()
     if loader is None:
         return (
             None,
             "statistical",
-            "TS Pulse API not importable "
-            f"({last_import_err or 'tsfm_public.models.tspulse missing'}); "
-            "using statistical detector. Install: pip install granite-tsfm",
+            "TS Pulse API not importable; using statistical detector. "
+            "Install: pip install granite-tsfm",
         )
 
+    local_dir = tspulse_local_dir(model_id, revision)
     last_err: Optional[Exception] = None
-    for mid in (model_id, *TSPULSE_FALLBACK_IDS):
-        # Prefer default revision first (anomaly-specific rev often 404s)
-        for kwargs in ({}, {"revision": revision} if revision else {}):
-            if not kwargs and revision is None:
-                pass
-            try:
-                model = loader.from_pretrained(mid, **kwargs)
-                model.eval()
-                rev_note = kwargs.get("revision") or "default"
-                return model, "tspulse", f"Loaded TS Pulse from {mid} ({rev_note})"
-            except Exception as exc:  # noqa: BLE001
-                last_err = exc
-                continue
+    try:
+        if auto_download:
+            root, _msg = download_hf_repo_to_local(
+                model_id, local_dir, revision=revision
+            )
+        elif _local_model_ready(local_dir):
+            root = _resolve_local_model_root(local_dir)
+        else:
+            return (
+                None,
+                "statistical",
+                f"TS Pulse weights missing under {local_dir}; using statistical detector",
+            )
+        model = loader.from_pretrained(str(root), local_files_only=True)
+        model.eval()
+        try:
+            from .device import move_module_to_device, torch_device
+
+            model = move_module_to_device(model, torch_device())
+        except Exception:
+            pass
+        return model, "tspulse", f"Loaded TS Pulse from {root}"
+    except Exception as exc:  # noqa: BLE001
+        last_err = exc
 
     return (
         None,
@@ -549,20 +552,49 @@ def _load_tspulse_classifier() -> Tuple[Any, List[str], bool, str]:
                 f"Loaded fine-tuned classifier from {local} ({n_out} classes)",
             )
 
-        # Scaffold: pretrained backbone + newly initialized classification head
-        model = TSPulseForClassification.from_pretrained(
-            model_id,
-            revision=revision,
-            num_targets=len(labels),
-            num_input_channels=n_ch,
-        )
+        # Scaffold: download dual-head revision into models/tspulse_clf/ then load
+        from .download import download_hf_repo_to_local, tspulse_clf_local_dir
+
+        clf_dir = tspulse_clf_local_dir(model_id, revision)
+        try:
+            root, dl_msg = download_hf_repo_to_local(
+                model_id, clf_dir, revision=revision
+            )
+            logger.info("TS Pulse classifier weights: %s", dl_msg)
+            model = TSPulseForClassification.from_pretrained(
+                str(root),
+                local_files_only=True,
+                num_targets=len(labels),
+                num_input_channels=n_ch,
+            )
+        except Exception as local_exc:  # noqa: BLE001
+            logger.warning(
+                "Local classifier snapshot failed (%s); hub fallback", local_exc
+            )
+            model = TSPulseForClassification.from_pretrained(
+                model_id,
+                revision=revision,
+                num_targets=len(labels),
+                num_input_channels=n_ch,
+            )
+            try:
+                download_hf_repo_to_local(model_id, clf_dir, revision=revision)
+            except Exception:
+                pass
         model.eval()
+        try:
+            from .device import move_module_to_device, torch_device
+
+            model = move_module_to_device(model, torch_device())
+        except Exception:
+            pass
         return (
             model,
             labels,
             False,
-            f"Scaffold classifier loaded ({revision}, {len(labels)} classes, "
-            f"{n_ch} channels) — UNTRAINED head; set GT_TSPULSE_CLF_PATH after fine-tune",
+            f"Scaffold classifier loaded from models/tspulse_clf ({revision}, "
+            f"{len(labels)} classes, {n_ch} channels) — UNTRAINED head; "
+            f"set GT_TSPULSE_CLF_PATH after fine-tune",
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("Classifier load failed: %s", exc)

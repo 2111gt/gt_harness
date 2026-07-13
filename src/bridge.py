@@ -1,5 +1,5 @@
 """
-Machine-readable diagnosis bridge for alternate frontends (ratatui, etc.).
+Machine-readable diagnosis bridge for alternate frontends / automation.
 
 The Python pipeline stays the single source of truth. External TUIs call:
 
@@ -112,6 +112,16 @@ def result_to_bridge_dict(result: Any, *, bundle: Any = None) -> Dict[str, Any]:
         "reflection": result.reflection or "",
         "display_markdown": display,
         "evidence_ascii": evidence_ascii,
+        "evidence_image_paths": list(
+            getattr(result.evidence, "image_paths", None) or []
+        )
+        if getattr(result, "evidence", None) is not None
+        else [],
+        "evidence_combined_image": (
+            getattr(result.evidence, "combined_image_path", "") or ""
+        )
+        if getattr(result, "evidence", None) is not None
+        else "",
         "proof_channels": channels,
         "model_status": dict(result.model_status or {}),
         "llm_available": bool(llm_available(bundle)) if bundle is not None else None,

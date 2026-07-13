@@ -27,6 +27,11 @@ models/*.safetensors
 models/**/*.gguf
 models/llama-cpp-bin/**
 !models/llama-cpp-bin/.gitkeep
+# TS Pulse / classifier weights (downloaded like GGUF; not for GitHub)
+models/tspulse/**
+!models/tspulse/.gitkeep
+models/tspulse_clf/**
+!models/tspulse_clf/.gitkeep
 !models/README.md
 models/.cache/
 
@@ -42,6 +47,3 @@ Thumbs.db
 .env.*
 !.env.example
 
-# Rust ratatui frontend build artifacts
-tui_ratatui/target/
-**/*.rs.bk

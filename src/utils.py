@@ -26,6 +26,9 @@ from typing import Any, Dict, List, Optional, Sequence
 PROJECT_ROOT: Path = Path(__file__).resolve().parents[1]
 
 MODELS_DIR: Path = PROJECT_ROOT / "models"
+# Project-local HF weights (same idea as GGUF under models/)
+TSPULSE_MODELS_DIR: Path = MODELS_DIR / "tspulse"
+TSPULSE_CLF_MODELS_DIR: Path = MODELS_DIR / "tspulse_clf"
 KNOWLEDGE_DIR: Path = PROJECT_ROOT / "knowledge"
 SAVED_CASES_DIR: Path = PROJECT_ROOT / "saved_cases"
 CHROMA_DIR: Path = PROJECT_ROOT / "chroma_db"
@@ -42,7 +45,15 @@ RAG_COLLECTION_NAME = "gt_knowledge"
 
 def ensure_directories() -> None:
     """Create required folders if they do not exist."""
-    for path in (MODELS_DIR, KNOWLEDGE_DIR, SAVED_CASES_DIR, CHROMA_DIR, SAMPLES_DIR):
+    for path in (
+        MODELS_DIR,
+        TSPULSE_MODELS_DIR,
+        TSPULSE_CLF_MODELS_DIR,
+        KNOWLEDGE_DIR,
+        SAVED_CASES_DIR,
+        CHROMA_DIR,
+        SAMPLES_DIR,
+    ):
         path.mkdir(parents=True, exist_ok=True)
 
 

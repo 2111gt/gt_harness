@@ -499,10 +499,12 @@ def run_diagnosis(
         )
         if evidence.channels:
             names = ", ".join(c.name for c in evidence.channels)
+            n_png = len(evidence.image_paths or [])
             _live(
                 "plots",
                 f"**Proof plots ready** for: `{names}`\n\n"
-                "Full ASCII charts appear under *Proof plots* in the report pane.",
+                f"PNG charts: {n_png} file(s) under `logs/evidence_plots/` "
+                "(GUI Proof plots tab). ASCII braille in TUI/report.",
             )
         else:
             _live("plots", "_No proof plots (no scored channels)._")

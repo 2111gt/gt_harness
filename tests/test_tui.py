@@ -92,10 +92,12 @@ class TestTuiStructure(unittest.TestCase):
 
     def test_app_entry_defaults_to_tui_not_gradio(self):
         app_src = (ROOT / "app.py").read_text(encoding="utf-8")
-        # Launch goes through interchangeable UI backends
+        # Launch goes through interchangeable UI backends (textual / gui)
         self.assertIn("launch_ui", app_src)
         self.assertIn("cli-once", app_src)
         self.assertIn("--ui", app_src)
+        self.assertIn("gui", app_src)
+        self.assertNotIn("ratatui", app_src)
         # Gradio should not be the default launch path
         self.assertNotIn("demo.launch", app_src)
         self.assertNotIn("import gradio", app_src)

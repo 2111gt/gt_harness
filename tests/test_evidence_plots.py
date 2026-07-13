@@ -16,6 +16,10 @@ if str(ROOT) not in sys.path:
 from src.analysis import run_diagnosis
 from src.evidence_plots import (
     build_evidence_bundle,
+    channel_common_name,
+    channel_display_title,
+    channel_xlabel,
+    channel_ylabel,
     evidence_to_markdown,
     select_issue_channels,
 )
@@ -50,6 +54,21 @@ class TestSelectChannels(unittest.TestCase):
         self.assertEqual(len(picks), 2)
         self.assertEqual(picks[0][0], "b")
         self.assertEqual(picks[0][2], [2])
+
+
+class TestChannelLabels(unittest.TestCase):
+    def test_common_names_and_titles(self):
+        self.assertIn("spread", channel_common_name("EGT_spread_C").lower())
+        self.assertIn("thermocouple", channel_common_name("TC12").lower())
+        self.assertIn("drive end", channel_common_name("vib_DE_mm_s").lower())
+        title = channel_display_title("EGT_spread_C", score=12.5)
+        self.assertIn("EGT_spread_C", title)
+        self.assertIn("Exhaust", title)
+        self.assertIn("12.5", title)
+        self.assertTrue(channel_ylabel("EGT_spread_C").startswith("Y:"))
+        self.assertIn("°C", channel_ylabel("EGT_spread_C"))
+        self.assertTrue(channel_xlabel(window_start=10, window_end=50).startswith("X:"))
+        self.assertIn("10", channel_xlabel(window_start=10, window_end=50))
 
 
 class TestBuildPlots(unittest.TestCase):
@@ -119,6 +138,15 @@ class TestBuildPlots(unittest.TestCase):
         # Flags present on the spiked window when statistical engine fires
         if any(c.flag_rows for c in ev.channels):
             self.assertIn("▲", ev.ascii_art)
+        # High-quality PNG path for GUI (matplotlib)
+        if ev.image_paths:
+            from pathlib import Path
+
+            self.assertTrue(Path(ev.image_paths[0]).is_file())
+            self.assertTrue(
+                (ev.combined_image_path and Path(ev.combined_image_path).is_file())
+                or Path(ev.image_paths[0]).suffix.lower() == ".png"
+            )
 
 
 if __name__ == "__main__":
