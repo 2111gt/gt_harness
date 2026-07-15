@@ -35,6 +35,18 @@ models/tspulse_clf/**
 !models/README.md
 models/.cache/
 
+# gt_simple mini-app local artifacts
+gt_simple/.venv/
+gt_simple/__pycache__/
+gt_simple/chroma_db/**
+!gt_simple/chroma_db/.gitkeep
+gt_simple/logs/**
+!gt_simple/logs/.gitkeep
+gt_simple/models/**
+!gt_simple/models/.gitkeep
+gt_simple/saved_cases/*.json
+!gt_simple/saved_cases/.gitkeep
+
 # OS / IDE
 .DS_Store
 Thumbs.db
