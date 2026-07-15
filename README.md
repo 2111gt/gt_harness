@@ -180,6 +180,20 @@ Project wiki-style docs live in [docs/](docs/Home.md) (Getting Started, UIs, mod
 
 Published wiki (when available): https://github.com/2111gt/gt_harness/wiki
 
+## GT Simple (mini-app)
+
+A **one-file** Streamlit/CLI variant lives in [`gt_simple/`](gt_simple/README.md):
+
+```powershell
+cd gt_simple
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+streamlit run app.py
+```
+
+When `gt_simple/models/` is empty, it reuses the parent harness `models/` (GGUF / TS Pulse).
+
 ## License
 
 MIT — sample knowledge is educational, not OEM documentation.
