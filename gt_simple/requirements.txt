@@ -1,0 +1,17 @@
+# GT Simple — minimal deps for the one-file app
+pandas>=2.0.0
+numpy>=1.24.0
+streamlit>=1.28.0
+
+# Vector RAG (uses Chroma built-in ONNX embeddings; no sentence-transformers required)
+chromadb>=0.5.0
+onnxruntime>=1.16.0
+
+# Optional — TS Pulse recon + clf (statistical/heuristic fallback if missing):
+# torch>=2.0.0
+# transformers>=4.57.0,<5.0
+# granite-tsfm>=0.2.0
+# tqdm>=4.66.0
+
+# Optional — GGUF via Python (else models/llama-cpp-bin llama-cli):
+# llama-cpp-python>=0.3.0
